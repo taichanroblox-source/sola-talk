@@ -7,7 +7,17 @@ let micEnabled = true, camEnabled = true, startTime = 0, timerInterval = null;
 const peers = new Map(), remoteStreams = new Map(), names = new Map();
 const hostStorageKey = id => "sola-talk-host-" + id;
 
-const rtcConfig = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+const rtcConfig = {iceServers:[
+ {urls:"stun:stun.l.google.com:19302"},
+ {urls:"stun:stun1.l.google.com:19302"},
+ {urls:"stun:stun2.l.google.com:19302"}
+]};
+async function loadRtcConfig(){
+ try{
+   const res=await fetch("/api/rtc-config",{cache:"no-store"});
+   if(res.ok){const cfg=await res.json();if(Array.isArray(cfg.iceServers)&&cfg.iceServers.length)rtcConfig.iceServers=cfg.iceServers;}
+ }catch(e){console.warn("RTC config unavailable",e);}
+}
 const toast = message => { const t=$("toast"); t.textContent=message; t.style.display="block"; setTimeout(()=>{ if(t.textContent===message)t.style.display="none"; },4000); };
 const show = id => { ["home","lobby","call"].forEach(x=>$(x).classList.toggle("hidden",x!==id)); };
 const safeName = name => name || "ゲスト";
@@ -108,6 +118,7 @@ $("joinBtn").onclick=async ()=>{
  try {
  const name=$("displayName").value.trim()||"ゲスト";localStorage.setItem("sola-talk-name",name);
  $("joinBtn").disabled=true;
+ await loadRtcConfig();
  connect(name);
  }catch(err){toast("カメラ・マイクの許可を確認してね: "+err.message);}
 };
@@ -141,7 +152,15 @@ function createPeer(sid,initiator){
  if(screenStream)screenStream.getTracks().forEach(t=>pc.addTrack(t,screenStream));
  pc.onicecandidate=e=>{if(e.candidate)socket.emit("signal",{to:sid,kind:"candidate",payload:e.candidate});};
  pc.ontrack=e=>{let stream=remoteStreams.get(sid);if(!stream){stream=new MediaStream();remoteStreams.set(sid,stream);}stream.addTrack(e.track);e.track.onended=renderTiles;renderTiles();};
- pc.onconnectionstatechange=()=>{$("quality").textContent=pc.connectionState;};
+ pc.onconnectionstatechange=()=>{
+   $("quality").textContent=pc.connectionState;
+   if(pc.connectionState==="failed")toast("相手との通信に失敗したよ。ネットワーク接続またはTURNサーバーの設定を確認してね");
+ };
+ pc.oniceconnectionstatechange=()=>{
+   console.info("WebRTC ICE",sid,pc.iceConnectionState,pc.iceGatheringState);
+   if(pc.iceConnectionState==="failed")toast("映像・音声の接続に失敗したよ（ICE failed）。TURNサーバーが必要なネットワークかもしれないよ");
+ };
+ pc.onicecandidateerror=e=>console.warn("ICE server error",e.errorCode,e.errorText);
  if(initiator)makeOffer(sid,pc);
  return pc;
 }
