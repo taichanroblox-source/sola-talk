@@ -30,6 +30,20 @@ def home():
 def call(room_id):
     return render_template("index.html", room_id=room_id)
 
+@app.get("/api/rtc-config")
+def rtc_config():
+    servers = [
+        {"urls": "stun:stun.l.google.com:19302"},
+        {"urls": "stun:stun1.l.google.com:19302"},
+        {"urls": "stun:stun2.l.google.com:19302"},
+    ]
+    turn_url = os.environ.get("TURN_URL", "").strip()
+    turn_username = os.environ.get("TURN_USERNAME", "").strip()
+    turn_credential = os.environ.get("TURN_CREDENTIAL", "").strip()
+    if turn_url and turn_username and turn_credential:
+        servers.append({"urls": turn_url, "username": turn_username, "credential": turn_credential})
+    return jsonify(iceServers=servers)
+
 @app.post("/api/rooms")
 def create_room():
     data = request.get_json(silent=True) or {}
