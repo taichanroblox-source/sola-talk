@@ -50,6 +50,9 @@ $("themeBtn").onclick=()=>setTheme(document.body.classList.contains("light")?"da
 const savedName=()=>{try{return localStorage.getItem("sola-talk-name")||"";}catch{return "";}};
 const saveName=()=>{const name=$("displayName").value.trim();try{if(name)localStorage.setItem("sola-talk-name",name);}catch(e){console.warn("Name storage",e);}};
 $("displayName").value="";
+const nameHint=$("displayName").getAttribute("placeholder")||"";
+$("displayName").addEventListener("focus",()=>{$("displayName").placeholder="";});
+$("displayName").addEventListener("blur",()=>{if(!$("displayName").value)$("displayName").placeholder=nameHint;});
 $("displayName").addEventListener("input",saveName);
 $("displayName").addEventListener("change",saveName);
 $("createForm").onsubmit=async e=>{
@@ -256,7 +259,7 @@ function tile(id,name,stream,self=false){
 function renderTiles(){
  if(!joined)return;
  const tiles=$("tiles");tiles.replaceChildren();
- tiles.append(tile("me",savedName()||"自分",local,true));
+ tiles.append(tile("me",$("displayName").value.trim()||"ゲスト",local,true));
  for(const [sid,name] of names){if(sid!==socket?.id){tiles.append(tile(sid,name,remoteStreams.get(sid)));if(remoteScreenIds.has(sid))tiles.append(tile("screen-"+sid,name+"の画面",remoteScreens.get(sid)));}}
  if(screenStream)tiles.append(tile("screen-me","自分の画面",screenStream,true));
 }
