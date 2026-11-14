@@ -161,7 +161,7 @@ def signal(data):
     room_id = socket_rooms.get(request.sid)
     room = rooms.get(room_id)
     target = str(data.get("to") or "")
-    if not room or target not in room["members"] or data.get("kind") not in ("offer", "answer", "candidate"):
+    if not room or target not in room["members"] or data.get("kind") not in ("offer", "answer", "candidate", "screen"):
         return
     socketio.emit("signal", {"from": request.sid, "kind": data["kind"], "payload": data.get("payload")}, to=target)
 
