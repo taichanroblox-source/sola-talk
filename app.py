@@ -11,6 +11,15 @@ socketio = SocketIO(app, cors_allowed_origins=None, async_mode="threading")
 rooms = {}
 socket_rooms = {}
 MAX_PEERS = 5
+EMPTY_ROOM_TTL = 30 * 60
+
+def prune_empty_rooms():
+    now = time.time()
+    for room_id, room in list(rooms.items()):
+        empty_since = room.get("empty_since")
+        if not room["members"] and empty_since is not None and now - empty_since >= EMPTY_ROOM_TTL:
+            rooms.pop(room_id, None)
+
 
 def info(room):
     return {
@@ -46,6 +55,7 @@ def rtc_config():
 
 @app.post("/api/rooms")
 def create_room():
+    prune_empty_rooms()
     data = request.get_json(silent=True) or {}
     name = str(data.get("name", "通話ルーム")).strip()[:60] or "通話ルーム"
     try:
@@ -62,12 +72,13 @@ def create_room():
         "password": password, "host_key": host_key,
         "approval": bool(data.get("approval", False)),
         "locked": False, "members": {}, "pending": {},
-        "created": time.time()
+        "created": time.time(), "empty_since": time.time()
     }
     return jsonify(room=info(rooms[room_id]), host_key=host_key, url=f"/r/{room_id}")
 
 @app.get("/api/rooms/<room_id>")
 def get_room(room_id):
+    prune_empty_rooms()
     room = rooms.get(room_id)
     if not room:
         return jsonify(error="ルームが見つかりません"), 404
@@ -83,6 +94,7 @@ def admit(sid, room, name, is_host=False):
     if len(room["members"]) >= room["limit"]:
         socketio.emit("join_error", {"error": "ルームは満員です"}, to=sid)
         return
+    room["empty_since"] = None
     room["members"][sid] = {"name": name, "host": is_host}
     socket_rooms[sid] = room["id"]
     join_room(room["id"], sid=sid)
@@ -92,6 +104,7 @@ def admit(sid, room, name, is_host=False):
 
 @socketio.on("join_call")
 def join_call(data):
+    prune_empty_rooms()
     data = data or {}
     room = rooms.get(str(data.get("room_id", "")))
     if not room:
@@ -149,6 +162,8 @@ def manage(data):
 
 def evict(sid, room):
     room["members"].pop(sid, None)
+    if not room["members"]:
+        room["empty_since"] = time.time()
     socket_rooms.pop(sid, None)
     room["pending"].pop(sid, None)
     leave_room(room["id"], sid=sid)
