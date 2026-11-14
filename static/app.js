@@ -64,7 +64,7 @@ async function toggleDevice(kind){
    try{
      const stream=await navigator.mediaDevices.getUserMedia(isMic
        ?{audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false}
-       :{audio:false,video:{width:{ideal:640},height:{ideal:360},frameRate:{ideal:15,max:20}}});
+       :{audio:false,video:true});
      for(const track of stream.getTracks()){local.addTrack(track);track.onended=()=>{if(local.getTracks().includes(track)){local.removeTrack(track);if(isMic)micEnabled=false;else camEnabled=false;updateDeviceUI();syncTracks();}};}
      if(isMic)micEnabled=true;else camEnabled=true;
    }catch(e){
@@ -72,6 +72,8 @@ async function toggleDevice(kind){
      const label=isMic?"マイク":"カメラ";
      if(e.name==="NotAllowedError"||e.name==="PermissionDeniedError"){
        toast(label+"の使用がブロックされている可能性があるよ。アドレスバー横のサイト設定で許可してから、もう一度ONを押してね");
+     }else if(e.name==="OverconstrainedError"){
+       toast(label+"の画質設定が端末に合わなかったよ。もう一度ONを押してね");
      }else if(e.name==="NotFoundError"||e.name==="DevicesNotFoundError"){
        toast(label+"が見つからないよ。Macの接続機器を確認してね");
      }else if(e.name==="NotReadableError"||e.name==="TrackStartError"){
