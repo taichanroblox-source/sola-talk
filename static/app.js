@@ -4,7 +4,7 @@ const $ = id => document.getElementById(id);
 const roomId = window.SOLA_ROOM_ID;
 let roomInfo = null, socket = null, local = null, screenStream = null, joined = false, isHost = false;
 let micEnabled = true, camEnabled = true, startTime = 0, timerInterval = null;
-const peers = new Map(), remoteStreams = new Map(), names = new Map();
+const peers = new Map(), remoteStreams = new Map(), remoteScreens = new Map(), names = new Map();
 const hostStorageKey = id => "sola-talk-host-" + id;
 
 const rtcConfig = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
@@ -114,14 +114,14 @@ $("joinBtn").onclick=async ()=>{
 function connect(name){
  socket=io({transports:["websocket","polling"],reconnection:true});
  socket.on("connect",()=>{ $("status").textContent="接続済み"; if(!joined)socket.emit("join_call",{room_id:roomId,host_key:hostKey(),name,password:$("password").value}); });
- socket.on("disconnect",()=>{$("status").textContent="再接続中";joined=false;for(const pc of peers.values())pc.close();peers.clear();remoteStreams.clear();});
+ socket.on("disconnect",()=>{$("status").textContent="再接続中";joined=false;for(const pc of peers.values())pc.close();peers.clear();remoteStreams.clear();remoteScreens.clear();});
  socket.on("waiting",()=>{toast("管理者の承認待ち");$("joinBtn").disabled=true;});
  socket.on("join_error",d=>{$("joinBtn").disabled=false;toast(d.error);});
  socket.on("action_error",d=>toast(d.error));
  socket.on("admitted",d=>{joined=true;isHost=d.host;roomInfo=d.room;startCall();});
  socket.on("roster",d=>{names.clear();d.members.forEach(m=>names.set(m.sid,m.name));renderTiles(); for(const m of d.members){if(m.sid!==socket.id && !peers.has(m.sid))createPeer(m.sid,socket.id<m.sid);}});
  socket.on("peer_joined",d=>{names.set(d.sid,d.name);beep();renderTiles();});
- socket.on("peer_left",d=>{peers.get(d.sid)?.close();peers.delete(d.sid);remoteStreams.delete(d.sid);names.delete(d.sid);beep();renderTiles();});
+ socket.on("peer_left",d=>{peers.get(d.sid)?.close();peers.delete(d.sid);remoteStreams.delete(d.sid);remoteScreens.delete(d.sid);names.delete(d.sid);beep();renderTiles();});
  socket.on("signal",handleSignal);
  socket.on("chat",d=>addMessage(d.name,d.text));
  socket.on("pending_requests",d=>{if(isHost)renderRequests(d.requests);});
@@ -138,9 +138,23 @@ function startCall(){
 function createPeer(sid,initiator){
  const pc=new RTCPeerConnection(rtcConfig);peers.set(sid,pc);
  for(const kind of ["audio","video"]){const t=local?.getTracks().find(t=>t.kind===kind);const tr=pc.addTransceiver(t||kind,{direction:"sendrecv",streams:[local]});tr.sender._solaKind=kind;}
- if(screenStream)screenStream.getTracks().forEach(t=>pc.addTrack(t,screenStream));
+ // Reserve a dedicated video transceiver for screen sharing.
+ // Screen ON/OFF only replaces this track; it never renegotiates camera/mic.
+ const screenTransceiver=pc.addTransceiver("video",{direction:"sendrecv"});
+ screenTransceiver.sender._solaKind="screen";
+ if(screenStream?.getVideoTracks()[0])screenTransceiver.sender.replaceTrack(screenStream.getVideoTracks()[0]).catch(console.warn);
  pc.onicecandidate=e=>{if(e.candidate)socket.emit("signal",{to:sid,kind:"candidate",payload:e.candidate});};
- pc.ontrack=e=>{let stream=remoteStreams.get(sid);if(!stream){stream=new MediaStream();remoteStreams.set(sid,stream);}stream.addTrack(e.track);e.track.onended=renderTiles;renderTiles();};
+ pc.ontrack=e=>{
+   const isScreen=e.transceiver?.mid==="2";
+   const collection=isScreen?remoteScreens:remoteStreams;
+   let stream=collection.get(sid);
+   if(!stream){stream=new MediaStream();collection.set(sid,stream);}
+   stream.addTrack(e.track);
+   e.track.onmute=renderTiles;
+   e.track.onunmute=renderTiles;
+   e.track.onended=renderTiles;
+   renderTiles();
+ };
  pc.onconnectionstatechange=()=>{$("quality").textContent=pc.connectionState;};
  if(initiator)makeOffer(sid,pc);
  return pc;
@@ -174,6 +188,7 @@ function renderTiles(){
  tiles.append(tile("me",localStorage.getItem("sola-talk-name")||"自分",local,true));
  for(const [sid,name] of names){if(sid!==socket?.id)tiles.append(tile(sid,name,remoteStreams.get(sid)));}
  if(screenStream)tiles.append(tile("screen","共有中の画面",screenStream,true));
+ for(const [sid,stream] of remoteScreens){if(stream.getVideoTracks().some(t=>t.readyState==="live"&&!t.muted))tiles.append(tile("screen-"+sid,(names.get(sid)||"参加者")+" の画面",stream));}
 }
 function setupMeter(){
  if(!local||window.solaMeter)return;
@@ -191,9 +206,9 @@ async function stopScreenShare(){
  if(!old)return;
  screenStream=null;
  old.getTracks().forEach(t=>{t.onended=null;t.stop();});
- for(const [sid,pc] of peers){
-   const sender=pc.getSenders().find(x=>x.track && old.getTracks().includes(x.track));
-   if(sender){pc.removeTrack(sender);await makeOffer(sid,pc);}
+ for(const pc of peers.values()){
+   const sender=pc.getSenders().find(x=>x._solaKind==="screen");
+   if(sender)await sender.replaceTrack(null);
  }
  $("screenBtn").textContent="▣ 画面共有";
  renderTiles();
@@ -213,7 +228,7 @@ $("screenBtn").onclick=async()=>{
    if(!track)throw Error("画面が選択されませんでした");
    track.onended=()=>{stopScreenShare().catch(console.error);};
    try{await track.applyConstraints({frameRate:{ideal:10,max:10}});}catch(e){console.info("Screen frame rate constraint not supported",e);}
-   for(const [sid,pc] of peers){pc.addTrack(track,stream);await makeOffer(sid,pc);}
+   for(const pc of peers){const sender=pc.getSenders().find(x=>x._solaKind==="screen");if(sender)await sender.replaceTrack(track);}
    $("screenBtn").textContent="共有停止";
    renderTiles();
  }catch(e){
