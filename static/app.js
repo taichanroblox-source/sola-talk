@@ -278,7 +278,12 @@ $("screenBtn").onclick=async()=>{
   renderTiles();
  }catch(e){console.warn("Screen share error",e);toast("画面共有できません: "+e.message);}
 };
-$("chatBtn").onclick=()=>$("chatPanel").classList.toggle("hidden");
+$("chatBtn").onclick=()=>{
+ const open=$("chatPanel").classList.toggle("hidden")===false;
+ $("chatBtn").textContent=open?"💬 チャットを閉じる":"💬 チャットを開く";
+ $("chatBtn").setAttribute("aria-expanded",String(open));
+ $("call").classList.toggle("chatClosed",!open);
+};
 $("inviteBtn").onclick=async()=>{try{await navigator.clipboard.writeText(shareUrl());toast("招待URLをコピーしたよ");}catch{toast(shareUrl());}};
 $("leaveBtn").onclick=()=>{if(confirm("通話から退出する？")){socket?.emit("leave_call");cleanup();location.href="/";}};
 $("chatForm").onsubmit=e=>{e.preventDefault();const val=$("chatInput").value.trim();if(val&&joined){socket.emit("chat",{text:val});$("chatInput").value="";}};
