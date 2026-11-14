@@ -6,7 +6,7 @@ let roomInfo = null, socket = null, local = null, screenStream = null, joined = 
 let micEnabled = true, camEnabled = true, startTime = 0, timerInterval = null;
 const peers = new Map(), remoteStreams = new Map(), names = new Map();
 const hostStorageKey = id => "sola-talk-host-" + id;
-const settings = { audio: true, video: true };
+
 const rtcConfig = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
 const toast = message => { const t=$("toast"); t.textContent=message; t.style.display="block"; setTimeout(()=>{ if(t.textContent===message)t.style.display="none"; },4000); };
 const show = id => { ["home","lobby","call"].forEach(x=>$(x).classList.toggle("hidden",x!==id)); };
@@ -38,22 +38,56 @@ async function setupLobby(){
  const res=await fetch("/api/rooms/"+encodeURIComponent(roomId));
  if(!res.ok){show("home");toast("ルームが見つかりません");return;}
  roomInfo=await res.json();$("lobbyName").textContent=roomInfo.name;$("roomMeta").textContent=roomInfo.count+" / "+roomInfo.limit+"人";
- $("password").parentElement.classList.toggle("hidden",!!hostKey() || !roomInfo.approval && !roomInfo.password);
+ $("password").parentElement.classList.toggle("hidden",!!hostKey() || !roomInfo.password);
  show("lobby");
 }
-async function getLocal(){
- if(local)return local;
- local=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:{width:{ideal:640},height:{ideal:360},frameRate:{ideal:15,max:20}}});
- local.getAudioTracks().forEach(t=>t.enabled=micEnabled);local.getVideoTracks().forEach(t=>t.enabled=camEnabled);
- $("preview").srcObject=local;return local;
+// Permission requests happen only when the user turns a device ON.
+micEnabled=false;camEnabled=false;
+local=new MediaStream();
+function updateDeviceUI(){
+ $("previewMic").textContent="マイク "+(micEnabled?"ON":"OFF");
+ $("previewCam").textContent="カメラ "+(camEnabled?"ON":"OFF");
+ $("micBtn").textContent=micEnabled?"🎙 マイクON":"🔇 マイクOFF";
+ $("camBtn").textContent=camEnabled?"📷 カメラON":"📷 カメラOFF";
+ $("preview").srcObject=local;
+ renderTiles();
 }
-$("previewMic").onclick=()=>{micEnabled=!micEnabled;if(local)local.getAudioTracks().forEach(t=>t.enabled=micEnabled);$("previewMic").textContent="マイク "+(micEnabled?"ON":"OFF");};
-$("previewCam").onclick=()=>{camEnabled=!camEnabled;if(local)local.getVideoTracks().forEach(t=>t.enabled=camEnabled);$("previewCam").textContent="カメラ "+(camEnabled?"ON":"OFF");};
+async function toggleDevice(kind){
+ const isMic=kind==="audio";
+ const active=isMic?micEnabled:camEnabled;
+ const tracks=isMic?local.getAudioTracks():local.getVideoTracks();
+ if(active){
+   tracks.forEach(t=>{t.stop();local.removeTrack(t);});
+   if(isMic)micEnabled=false;else camEnabled=false;
+ }else{
+   if(!navigator.mediaDevices?.getUserMedia){toast("HTTPSまたはlocalhostで開いてね");return;}
+   try{
+     const stream=await navigator.mediaDevices.getUserMedia(isMic
+       ?{audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true},video:false}
+       :{audio:false,video:{width:{ideal:640},height:{ideal:360},frameRate:{ideal:15,max:20}}});
+     for(const track of stream.getTracks()){local.addTrack(track);track.onended=()=>{if(local.getTracks().includes(track)){local.removeTrack(track);if(isMic)micEnabled=false;else camEnabled=false;updateDeviceUI();syncTracks();}};}
+     if(isMic)micEnabled=true;else camEnabled=true;
+   }catch(e){toast((isMic?"マイク":"カメラ")+"を使えません。ブラウザの権限設定を確認してね");return;}
+ }
+ updateDeviceUI();
+ await syncTracks();
+}
+async function syncTracks(){
+ for(const [sid,pc] of peers){
+   const senders=pc.getSenders();
+   for(const kind of ["audio","video"]){
+     const track=kind==="audio"?local.getAudioTracks()[0]:local.getVideoTracks()[0];
+     const sender=senders.find(x=>x.track?.kind===kind && !(screenStream && screenStream.getTracks().includes(x.track)));
+     if(sender){await sender.replaceTrack(track||null);}
+     else if(track){pc.addTrack(track,local);await makeOffer(sid,pc);}
+   }
+ }
+}
+$("previewMic").onclick=()=>toggleDevice("audio");
+$("previewCam").onclick=()=>toggleDevice("video");
 $("backBtn").onclick=()=>location.href="/";
 $("joinBtn").onclick=async ()=>{
  try {
- if(!navigator.mediaDevices?.getUserMedia)throw Error("HTTPSまたはlocalhostで開いてね");
- await getLocal();
  const name=$("displayName").value.trim()||"ゲスト";localStorage.setItem("sola-talk-name",name);
  $("joinBtn").disabled=true;
  connect(name);
@@ -128,8 +162,8 @@ function setupMeter(){
  window.solaMeter=true;loop();
  }catch{}
 }
-$("micBtn").onclick=()=>{micEnabled=!micEnabled;local?.getAudioTracks().forEach(t=>t.enabled=micEnabled);$("micBtn").textContent=micEnabled?"🎙 マイクON":"🔇 マイクOFF";};
-$("camBtn").onclick=()=>{camEnabled=!camEnabled;local?.getVideoTracks().forEach(t=>t.enabled=camEnabled);$("camBtn").textContent=camEnabled?"📷 カメラON":"📷 カメラOFF";renderTiles();};
+$("micBtn").onclick=()=>toggleDevice("audio");
+$("camBtn").onclick=()=>toggleDevice("video");
 $("screenBtn").onclick=async()=>{
  try{
  if(screenStream){screenStream.getTracks().forEach(t=>t.stop());screenStream=null;for(const pc of peers.values()){for(const sender of pc.getSenders()){if(sender.track?.label==="SOLA SCREEN")pc.removeTrack(sender);}}$("screenBtn").textContent="▣ 画面共有";return;}
