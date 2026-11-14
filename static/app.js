@@ -5,6 +5,7 @@ const roomId = window.SOLA_ROOM_ID;
 let roomInfo = null, socket = null, local = null, screenStream = null, joined = false, isHost = false;
 let micEnabled = true, camEnabled = true, startTime = 0, timerInterval = null;
 const peers = new Map(), remoteStreams = new Map(), names = new Map();
+const remoteScreens = new Map(), remoteScreenIds = new Map();
 const hostStorageKey = id => "sola-talk-host-" + id;
 
 const rtcConfig={iceServers:[{urls:"stun:stun.l.google.com:19302"},{urls:"stun:stun1.l.google.com:19302"}]};
@@ -21,7 +22,11 @@ const hostKey = () => sessionStorage.getItem(hostStorageKey(roomId)) || "";
 const setTheme = val => {document.body.classList.toggle("light",val==="light");localStorage.setItem("sola-talk-theme",val);};
 setTheme(localStorage.getItem("sola-talk-theme")||"dark");
 $("themeBtn").onclick=()=>setTheme(document.body.classList.contains("light")?"dark":"light");
-$("displayName").value=localStorage.getItem("sola-talk-name")||"";
+const savedName=()=>{try{return localStorage.getItem("sola-talk-name")||"";}catch{return "";}};
+const saveName=()=>{const name=$("displayName").value.trim();try{if(name)localStorage.setItem("sola-talk-name",name);}catch(e){console.warn("Name storage",e);}};
+$("displayName").value=savedName();
+$("displayName").addEventListener("input",saveName);
+$("displayName").addEventListener("change",saveName);
 $("createForm").onsubmit=async e=>{
  e.preventDefault();
  try{
@@ -78,14 +83,15 @@ async function toggleDevice(kind){
 }
 async function syncTracks(){
  for(const [sid,pc] of peers){
-   const senders=pc.getSenders();
-   for(const kind of ["audio","video"]){
-     const track=kind==="audio"?local.getAudioTracks()[0]:local.getVideoTracks()[0];
-     const sender=senders.find(x=>x.track?.kind===kind);
-     const outgoing=kind==="video"&&screenStream?screenStream.getVideoTracks()[0]:track;
-     if(sender){await sender.replaceTrack(outgoing||null);}
-     else if(outgoing){pc.addTrack(outgoing,kind==="video"&&screenStream?screenStream:local);await makeOffer(sid,pc);}
+  for(const kind of ["audio","video"]){
+   const track=kind==="audio"?local.getAudioTracks()[0]:local.getVideoTracks()[0];
+   let sender=pc.getSenders().find(x=>x._solaKind===kind);
+   if(sender)await sender.replaceTrack(track||null);
+   else if(track){
+    sender=pc.addTrack(track,local);sender._solaKind=kind;
+    await makeOffer(sid,pc);
    }
+  }
  }
 }
 $("previewMic").onclick=()=>toggleDevice("audio");
@@ -93,7 +99,7 @@ $("previewCam").onclick=()=>toggleDevice("video");
 $("backBtn").onclick=()=>location.href="/";
 $("joinBtn").onclick=async ()=>{
  try {
- const name=$("displayName").value.trim()||"ゲスト";localStorage.setItem("sola-talk-name",name);
+ const name=$("displayName").value.trim()||savedName()||"ゲスト";saveName();
  $("joinBtn").disabled=true;
  await loadRtcConfig();
  connect(name);
@@ -102,14 +108,14 @@ $("joinBtn").onclick=async ()=>{
 function connect(name){
  socket=io({transports:["websocket","polling"],reconnection:true});
  socket.on("connect",()=>{ $("status").textContent="接続済み"; if(!joined)socket.emit("join_call",{room_id:roomId,host_key:hostKey(),name,password:$("password").value}); });
- socket.on("disconnect",()=>{$("status").textContent="再接続中";joined=false;for(const pc of peers.values())pc.close();peers.clear();remoteStreams.clear();});
+ socket.on("disconnect",()=>{$("status").textContent="再接続中";joined=false;for(const pc of peers.values())pc.close();peers.clear();remoteStreams.clear();remoteScreens.clear();remoteScreenIds.clear();});
  socket.on("waiting",()=>{toast("管理者の承認待ち");$("joinBtn").disabled=true;});
  socket.on("join_error",d=>{$("joinBtn").disabled=false;toast(d.error);});
  socket.on("action_error",d=>toast(d.error));
  socket.on("admitted",d=>{joined=true;isHost=d.host;roomInfo=d.room;startCall();});
  socket.on("roster",d=>{names.clear();d.members.forEach(m=>names.set(m.sid,m.name));renderTiles(); for(const m of d.members){if(m.sid!==socket.id && !peers.has(m.sid))createPeer(m.sid,socket.id<m.sid);}});
  socket.on("peer_joined",d=>{names.set(d.sid,d.name);beep();renderTiles();});
- socket.on("peer_left",d=>{peers.get(d.sid)?.close();peers.delete(d.sid);remoteStreams.delete(d.sid);names.delete(d.sid);beep();renderTiles();});
+ socket.on("peer_left",d=>{peers.get(d.sid)?.close();peers.delete(d.sid);remoteStreams.delete(d.sid);remoteScreens.delete(d.sid);remoteScreenIds.delete(d.sid);names.delete(d.sid);beep();renderTiles();});
  socket.on("signal",handleSignal);
  socket.on("chat",d=>addMessage(d.name,d.text));
  socket.on("pending_requests",d=>{if(isHost)renderRequests(d.requests);});
@@ -123,18 +129,50 @@ function startCall(){
  timerInterval=setInterval(()=>{const t=Math.floor((Date.now()-startTime)/1000);$("timer").textContent=String(Math.floor(t/60)).padStart(2,"0")+":"+String(t%60).padStart(2,"0");},1000);
  renderTiles();setupMeter();
 }
+function sendScreenState(sid,active,streamId){
+ if(socket?.connected)socket.emit("signal",{to:sid,kind:"screen",payload:{active,streamId:streamId||null}});
+}
+function classifyRemoteTrack(sid,track,streamId){
+ const screenId=remoteScreenIds.get(sid);
+ const isScreen=track.kind==="video"&&screenId&&screenId===streamId;
+ const targetMap=isScreen?remoteScreens:remoteStreams;
+ let stream=targetMap.get(sid);
+ if(!stream){stream=new MediaStream();targetMap.set(sid,stream);}
+ if(!stream.getTracks().includes(track))stream.addTrack(track);
+ track.onended=()=>{stream.removeTrack(track);renderTiles();};
+ renderTiles();
+}
+function updateRemoteScreenState(sid,payload){
+ if(payload?.active&&payload.streamId){
+  remoteScreenIds.set(sid,payload.streamId);
+  const main=remoteStreams.get(sid);
+  if(main)for(const track of main.getVideoTracks()){
+   if(track._solaStreamId===payload.streamId){
+    main.removeTrack(track);
+    classifyRemoteTrack(sid,track,payload.streamId);
+   }
+  }
+ }else{
+  remoteScreenIds.delete(sid);
+  remoteScreens.delete(sid);
+  renderTiles();
+ }
+}
 function createPeer(sid,initiator){
  const pc=new RTCPeerConnection(rtcConfig);peers.set(sid,pc);
- local?.getTracks().forEach(t=>pc.addTrack(t,local));
+ local?.getTracks().forEach(t=>{const sender=pc.addTrack(t,local);sender._solaKind=t.kind;});
  if(screenStream){
-  const screenTrack=screenStream.getVideoTracks()[0];
-  const videoSender=pc.getSenders().find(sender=>sender.track?.kind==="video");
-  if(screenTrack&&videoSender)videoSender.replaceTrack(screenTrack).catch(console.warn);
-  else if(screenTrack)pc.addTrack(screenTrack,screenStream);
+  const track=screenStream.getVideoTracks()[0];
+  if(track){const sender=pc.addTrack(track,screenStream);sender._solaScreen=true;}
  }
  pc.onicecandidate=e=>{if(e.candidate)socket.emit("signal",{to:sid,kind:"candidate",payload:e.candidate});};
- pc.ontrack=e=>{let stream=remoteStreams.get(sid);if(!stream){stream=new MediaStream();remoteStreams.set(sid,stream);}stream.addTrack(e.track);e.track.onended=renderTiles;renderTiles();};
+ pc.ontrack=e=>{
+  const streamId=e.streams[0]?.id||"";
+  e.track._solaStreamId=streamId;
+  classifyRemoteTrack(sid,e.track,streamId);
+ };
  pc.onconnectionstatechange=()=>{$("quality").textContent=pc.connectionState;};
+ if(screenStream)sendScreenState(sid,true,screenStream.id);
  if(initiator)makeOffer(sid,pc);
  return pc;
 }
@@ -155,6 +193,7 @@ async function flushCandidates(pc){
 }
 async function handleSignal(data){
  try{
+  if(data.kind==="screen"){updateRemoteScreenState(data.from,data.payload);return;}
   let pc=peers.get(data.from);
   if(!pc)pc=createPeer(data.from,false);
   if(data.kind==="offer"){
@@ -192,8 +231,9 @@ function tile(id,name,stream,self=false){
 function renderTiles(){
  if(!joined)return;
  const tiles=$("tiles");tiles.replaceChildren();
- tiles.append(tile("me",localStorage.getItem("sola-talk-name")||"自分",local,true));
- for(const [sid,name] of names){if(sid!==socket?.id)tiles.append(tile(sid,name,remoteStreams.get(sid)));}
+ tiles.append(tile("me",savedName()||"自分",local,true));
+ for(const [sid,name] of names){if(sid!==socket?.id){tiles.append(tile(sid,name,remoteStreams.get(sid)));if(remoteScreenIds.has(sid))tiles.append(tile("screen-"+sid,name+"の画面",remoteScreens.get(sid)));}}
+ if(screenStream)tiles.append(tile("screen-me","自分の画面",screenStream,true));
 }
 function setupMeter(){
  if(!local||window.solaMeter)return;
@@ -210,10 +250,10 @@ async function stopScreenShare(){
  const previous=screenStream;
  if(!previous)return;
  screenStream=null;
- const camera=local?.getVideoTracks()[0]||null;
  for(const [sid,pc] of peers){
-  const sender=pc.getSenders().find(x=>x.track&&previous.getTracks().includes(x.track));
-  if(sender)await sender.replaceTrack(camera);
+  const sender=pc.getSenders().find(x=>x._solaScreen);
+  if(sender){pc.removeTrack(sender);sender._solaScreen=false;await makeOffer(sid,pc);}
+  sendScreenState(sid,false);
  }
  previous.getTracks().forEach(t=>{t.onended=null;t.stop();});
  $("screenBtn").textContent="▣ 画面共有";
@@ -229,9 +269,10 @@ $("screenBtn").onclick=async()=>{
   screenStream=captured;
   track.onended=()=>stopScreenShare().catch(console.warn);
   for(const [sid,pc] of peers){
-   let sender=pc.getSenders().find(x=>x.track?.kind==="video");
-   if(sender)await sender.replaceTrack(track);
-   else{sender=pc.addTrack(track,captured);await makeOffer(sid,pc);}
+   sendScreenState(sid,true,captured.id);
+   const sender=pc.addTrack(track,captured);
+   sender._solaScreen=true;
+   await makeOffer(sid,pc);
   }
   $("screenBtn").textContent="共有停止";
   renderTiles();
@@ -246,7 +287,7 @@ function manage(action,options={}){socket.emit("manage",{room_id:roomId,host_key
 function renderRequests(requests){const box=$("requests");box.replaceChildren();for(const r of requests){const line=document.createElement("div");line.textContent=r.name+" が参加申請中 ";const yes=document.createElement("button");yes.textContent="承認";yes.onclick=()=>manage("approve",{target:r.sid});const no=document.createElement("button");no.className="secondary";no.textContent="拒否";no.onclick=()=>manage("reject",{target:r.sid});line.append(yes,no);box.append(line);} }
 $("lockBtn").onclick=()=>manage("lock",{value:!roomInfo.locked});
 $("endBtn").onclick=()=>{if(confirm("全員の通話を終了する？"))manage("end");};
-function cleanup(){joined=false;clearInterval(timerInterval);for(const pc of peers.values())pc.close();peers.clear();local?.getTracks().forEach(t=>t.stop());screenStream?.getTracks().forEach(t=>t.stop());socket?.disconnect();}
+function cleanup(){joined=false;clearInterval(timerInterval);for(const pc of peers.values())pc.close();peers.clear();remoteScreens.clear();remoteScreenIds.clear();local?.getTracks().forEach(t=>t.stop());screenStream?.getTracks().forEach(t=>t.stop());socket?.disconnect();}
 window.addEventListener("beforeunload",()=>{if(joined)socket?.emit("leave_call");});
 setupLobby();
 })();
