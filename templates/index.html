@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SOLA TALK</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdn.socket.io/4.8.1/socket.io.min.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+<header><div class="brand">SOLA <span>TALK</span></div><div class="right"><button id="themeBtn" class="secondary">☀︎ / ☾</button><span id="status">準備中</span></div></header>
+<main>
+  <section id="home" class="panel">
+    <h1>つながる、話せる。</h1><p class="muted">アカウント不要の音声・ビデオ・画面共有。最大5人。</p>
+    <div class="columns">
+      <form id="createForm" class="card">
+        <h2>ルームを作成</h2>
+        <label>ルーム名<input id="roomName" maxlength="60" required placeholder="例：ゲーム通話"></label>
+        <label>パスワード（任意）<input id="newPassword" type="password" autocomplete="new-password"></label>
+        <label>参加人数<select id="roomLimit"><option>2</option><option>3</option><option>4</option><option selected>5</option></select></label>
+        <label class="inline"><input id="approval" type="checkbox">参加承認をオン</label>
+        <button type="submit">ルームを作成</button>
+      </form>
+      <form id="joinForm" class="card">
+        <h2>ルームに参加</h2>
+        <label>通話URLまたはルームID<input id="joinUrl" placeholder="https://.../r/..." required></label>
+        <button type="submit">参加画面へ</button>
+      </form>
+    </div>
+  </section>
+  <section id="lobby" class="panel hidden">
+    <h1 id="lobbyName">通話に参加</h1>
+    <p id="roomMeta" class="muted"></p>
+    <label>表示名<input id="displayName" maxlength="32" placeholder="表示名"></label>
+    <label>ルームパスワード<input id="password" type="password" autocomplete="off"></label>
+    <div class="preview"><video id="preview" autoplay muted playsinline></video><span>カメラのプレビュー</span></div>
+    <div class="controls"><button id="previewMic" class="secondary">マイク ON</button><button id="previewCam" class="secondary">カメラ ON</button></div>
+    <div class="controls"><button id="joinBtn">通話に参加</button><button id="backBtn" class="secondary">戻る</button></div>
+  </section>
+  <section id="call" class="hidden">
+    <div class="callHead"><strong id="callTitle">通話ルーム</strong><span id="timer">00:00</span><span id="quality">接続中</span></div>
+    <div class="callBody"><div class="stage"><div id="tiles" class="tiles"></div><div class="toolbar">
+      <button id="micBtn" class="secondary">🎙 マイク</button><button id="camBtn" class="secondary">📷 カメラ</button>
+      <button id="screenBtn" class="secondary">▣ 画面共有</button><button id="chatBtn" class="secondary">チャット</button>
+      <button id="inviteBtn" class="secondary">招待URL</button><button id="leaveBtn" class="danger">退出</button></div>
+      <div id="hostControls" class="host hidden"><div><button id="lockBtn" class="secondary">ルームをロック</button><button id="endBtn" class="danger">全員終了</button></div><div id="requests"></div></div>
+    </div><aside id="chatPanel" class="chat"><h3>チャット</h3><div id="messages" class="messages"></div><form id="chatForm" class="chatForm"><input id="chatInput" maxlength="1000" placeholder="メッセージ" required><button>送信</button></form></aside></div>
+  </section>
+</main>
+<div id="toast" role="status" aria-live="polite"></div>
+<script>window.SOLA_ROOM_ID={{ room_id|default('', true)|tojson }};</script>
+</body></html>
