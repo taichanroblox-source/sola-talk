@@ -81,9 +81,10 @@ async function syncTracks(){
    const senders=pc.getSenders();
    for(const kind of ["audio","video"]){
      const track=kind==="audio"?local.getAudioTracks()[0]:local.getVideoTracks()[0];
-     const sender=senders.find(x=>x.track?.kind===kind && !(screenStream && screenStream.getTracks().includes(x.track)));
-     if(sender){await sender.replaceTrack(track||null);}
-     else if(track){pc.addTrack(track,local);await makeOffer(sid,pc);}
+     const sender=senders.find(x=>x.track?.kind===kind);
+     const outgoing=kind==="video"&&screenStream?screenStream.getVideoTracks()[0]:track;
+     if(sender){await sender.replaceTrack(outgoing||null);}
+     else if(outgoing){pc.addTrack(outgoing,kind==="video"&&screenStream?screenStream:local);await makeOffer(sid,pc);}
    }
  }
 }
@@ -125,7 +126,12 @@ function startCall(){
 function createPeer(sid,initiator){
  const pc=new RTCPeerConnection(rtcConfig);peers.set(sid,pc);
  local?.getTracks().forEach(t=>pc.addTrack(t,local));
- if(screenStream)screenStream.getTracks().forEach(t=>pc.addTrack(t,screenStream));
+ if(screenStream){
+  const screenTrack=screenStream.getVideoTracks()[0];
+  const videoSender=pc.getSenders().find(sender=>sender.track?.kind==="video");
+  if(screenTrack&&videoSender)videoSender.replaceTrack(screenTrack).catch(console.warn);
+  else if(screenTrack)pc.addTrack(screenTrack,screenStream);
+ }
  pc.onicecandidate=e=>{if(e.candidate)socket.emit("signal",{to:sid,kind:"candidate",payload:e.candidate});};
  pc.ontrack=e=>{let stream=remoteStreams.get(sid);if(!stream){stream=new MediaStream();remoteStreams.set(sid,stream);}stream.addTrack(e.track);e.track.onended=renderTiles;renderTiles();};
  pc.onconnectionstatechange=()=>{$("quality").textContent=pc.connectionState;};
@@ -200,15 +206,36 @@ function setupMeter(){
 }
 $("micBtn").onclick=()=>toggleDevice("audio");
 $("camBtn").onclick=()=>toggleDevice("video");
+async function stopScreenShare(){
+ const previous=screenStream;
+ if(!previous)return;
+ screenStream=null;
+ const camera=local?.getVideoTracks()[0]||null;
+ for(const [sid,pc] of peers){
+  const sender=pc.getSenders().find(x=>x.track&&previous.getTracks().includes(x.track));
+  if(sender)await sender.replaceTrack(camera);
+ }
+ previous.getTracks().forEach(t=>{t.onended=null;t.stop();});
+ $("screenBtn").textContent="▣ 画面共有";
+ renderTiles();
+}
 $("screenBtn").onclick=async()=>{
+ if(screenStream){await stopScreenShare();return;}
  try{
- if(screenStream){screenStream.getTracks().forEach(t=>t.stop());screenStream=null;for(const pc of peers.values()){for(const sender of pc.getSenders()){if(sender.track?.label==="SOLA SCREEN")pc.removeTrack(sender);}}$("screenBtn").textContent="▣ 画面共有";return;}
- screenStream=await navigator.mediaDevices.getDisplayMedia({video:{width:{ideal:1280,max:1280},height:{ideal:720,max:720},frameRate:{ideal:10,max:10}},audio:false});
- const track=screenStream.getVideoTracks()[0];
- track.onended=()=>{screenStream=null;$("screenBtn").textContent="▣ 画面共有";};
- for(const [sid,pc] of peers){pc.addTrack(track,screenStream);await makeOffer(sid,pc);}
- $("screenBtn").textContent="共有停止";
- }catch(e){toast("画面共有できません: "+e.message);}
+  if(!navigator.mediaDevices?.getDisplayMedia){toast("このブラウザは画面共有に対応していないよ");return;}
+  const captured=await navigator.mediaDevices.getDisplayMedia({video:true,audio:false});
+  const track=captured.getVideoTracks()[0];
+  if(!track){captured.getTracks().forEach(t=>t.stop());return;}
+  screenStream=captured;
+  track.onended=()=>stopScreenShare().catch(console.warn);
+  for(const [sid,pc] of peers){
+   let sender=pc.getSenders().find(x=>x.track?.kind==="video");
+   if(sender)await sender.replaceTrack(track);
+   else{sender=pc.addTrack(track,captured);await makeOffer(sid,pc);}
+  }
+  $("screenBtn").textContent="共有停止";
+  renderTiles();
+ }catch(e){console.warn("Screen share error",e);toast("画面共有できません: "+e.message);}
 };
 $("chatBtn").onclick=()=>$("chatPanel").classList.toggle("hidden");
 $("inviteBtn").onclick=async()=>{try{await navigator.clipboard.writeText(shareUrl());toast("招待URLをコピーしたよ");}catch{toast(shareUrl());}};
