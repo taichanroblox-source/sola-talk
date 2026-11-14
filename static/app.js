@@ -16,7 +16,32 @@ async function loadRtcConfig(){
 const toast = message => { const t=$("toast"); t.textContent=message; t.style.display="block"; setTimeout(()=>{ if(t.textContent===message)t.style.display="none"; },4000); };
 const show = id => { ["home","lobby","call"].forEach(x=>$(x).classList.toggle("hidden",x!==id)); };
 const safeName = name => name || "ゲスト";
-const beep = () => { try { const a=new (window.AudioContext||window.webkitAudioContext)(), o=a.createOscillator(), g=a.createGain();o.connect(g);g.connect(a.destination);o.frequency.value=640;g.gain.value=.035;o.start();o.stop(a.currentTime+.09);setTimeout(()=>a.close(),220);}catch{} };
+// Short, clearly audible notification tones with a gentle envelope.
+let notificationAudio=null;
+function beep(type="message"){
+ try{
+  const AudioContextClass=window.AudioContext||window.webkitAudioContext;
+  if(!AudioContextClass)return;
+  if(!notificationAudio)notificationAudio=new AudioContextClass();
+  const ctx=notificationAudio;
+  if(ctx.state==="suspended")ctx.resume().catch(()=>{});
+  const patterns={
+   join:[[660,0,0.13],[880,0.16,0.17]],
+   leave:[[720,0,0.13],[480,0.16,0.18]],
+   message:[[880,0,0.16]]
+  };
+  for(const [frequency,delay,duration] of patterns[type]||patterns.message){
+   const osc=ctx.createOscillator(),gain=ctx.createGain();
+   osc.type="sine";osc.frequency.setValueAtTime(frequency,ctx.currentTime+delay);
+   const start=ctx.currentTime+delay;
+   gain.gain.setValueAtTime(0.0001,start);
+   gain.gain.exponentialRampToValueAtTime(0.16,start+0.018);
+   gain.gain.exponentialRampToValueAtTime(0.0001,start+duration);
+   osc.connect(gain);gain.connect(ctx.destination);
+   osc.start(start);osc.stop(start+duration+0.02);
+  }
+ }catch(e){console.warn("Notification sound",e);}
+}
 const shareUrl = () => location.origin + "/r/" + roomId;
 const hostKey = () => sessionStorage.getItem(hostStorageKey(roomId)) || "";
 const setTheme = val => {document.body.classList.toggle("light",val==="light");localStorage.setItem("sola-talk-theme",val);};
@@ -114,8 +139,8 @@ function connect(name){
  socket.on("action_error",d=>toast(d.error));
  socket.on("admitted",d=>{joined=true;isHost=d.host;roomInfo=d.room;startCall();});
  socket.on("roster",d=>{names.clear();d.members.forEach(m=>names.set(m.sid,m.name));renderTiles(); for(const m of d.members){if(m.sid!==socket.id && !peers.has(m.sid))createPeer(m.sid,socket.id<m.sid);}});
- socket.on("peer_joined",d=>{names.set(d.sid,d.name);beep();renderTiles();});
- socket.on("peer_left",d=>{peers.get(d.sid)?.close();peers.delete(d.sid);remoteStreams.delete(d.sid);remoteScreens.delete(d.sid);remoteScreenIds.delete(d.sid);names.delete(d.sid);beep();renderTiles();});
+ socket.on("peer_joined",d=>{names.set(d.sid,d.name);beep("join");renderTiles();});
+ socket.on("peer_left",d=>{peers.get(d.sid)?.close();peers.delete(d.sid);remoteStreams.delete(d.sid);remoteScreens.delete(d.sid);remoteScreenIds.delete(d.sid);names.delete(d.sid);beep("leave");renderTiles();});
  socket.on("signal",handleSignal);
  socket.on("chat",d=>addMessage(d.name,d.text));
  socket.on("pending_requests",d=>{if(isHost)renderRequests(d.requests);});
@@ -287,7 +312,7 @@ $("chatBtn").onclick=()=>{
 $("inviteBtn").onclick=async()=>{try{await navigator.clipboard.writeText(shareUrl());toast("招待URLをコピーしたよ");}catch{toast(shareUrl());}};
 $("leaveBtn").onclick=()=>{if(confirm("通話から退出する？")){socket?.emit("leave_call");cleanup();location.href="/";}};
 $("chatForm").onsubmit=e=>{e.preventDefault();const val=$("chatInput").value.trim();if(val&&joined){socket.emit("chat",{text:val});$("chatInput").value="";}};
-function addMessage(name,text){const box=document.createElement("div");box.className="msg";const small=document.createElement("small");small.textContent=name;const content=document.createElement("div");content.textContent=text;box.append(small,content);$("messages").append(box);$("messages").scrollTop=$("messages").scrollHeight;beep();}
+function addMessage(name,text){const box=document.createElement("div");box.className="msg";const small=document.createElement("small");small.textContent=name;const content=document.createElement("div");content.textContent=text;box.append(small,content);$("messages").append(box);$("messages").scrollTop=$("messages").scrollHeight;beep("message");}
 function manage(action,options={}){socket.emit("manage",{room_id:roomId,host_key:hostKey(),action,...options});}
 function renderRequests(requests){const box=$("requests");box.replaceChildren();for(const r of requests){const line=document.createElement("div");line.textContent=r.name+" が参加申請中 ";const yes=document.createElement("button");yes.textContent="承認";yes.onclick=()=>manage("approve",{target:r.sid});const no=document.createElement("button");no.className="secondary";no.textContent="拒否";no.onclick=()=>manage("reject",{target:r.sid});line.append(yes,no);box.append(line);} }
 $("lockBtn").onclick=()=>manage("lock",{value:!roomInfo.locked});
