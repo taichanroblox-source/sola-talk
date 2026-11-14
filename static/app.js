@@ -132,17 +132,48 @@ function createPeer(sid,initiator){
  if(initiator)makeOffer(sid,pc);
  return pc;
 }
-async function makeOffer(sid,pc){try{const offer=await pc.createOffer();await pc.setLocalDescription(offer);socket.emit("signal",{to:sid,kind:"offer",payload:pc.localDescription});}catch(e){console.error(e);}}
+async function makeOffer(sid,pc){
+ if(pc.signalingState!=="stable" || pc._makingOffer){pc._offerQueued=true;return;}
+ pc._makingOffer=true;
+ try{
+  await pc.setLocalDescription(await pc.createOffer());
+  socket.emit("signal",{to:sid,kind:"offer",payload:pc.localDescription});
+ }catch(e){console.warn("Offer error",e);}
+ finally{pc._makingOffer=false;}
+}
+async function flushCandidates(pc){
+ const pending=pc._pendingIce||[];pc._pendingIce=[];
+ for(const candidate of pending){
+  try{await pc.addIceCandidate(candidate);}catch(e){console.warn("ICE candidate error",e);}
+ }
+}
 async function handleSignal(data){
  try{
- let pc=peers.get(data.from);
- if(!pc)pc=createPeer(data.from,false);
- if(data.kind==="offer"){
- await pc.setRemoteDescription(data.payload);
- const ans=await pc.createAnswer();await pc.setLocalDescription(ans);
- socket.emit("signal",{to:data.from,kind:"answer",payload:pc.localDescription});
- }else if(data.kind==="answer"){await pc.setRemoteDescription(data.payload);}
- else if(data.kind==="candidate"){await pc.addIceCandidate(data.payload);}
+  let pc=peers.get(data.from);
+  if(!pc)pc=createPeer(data.from,false);
+  if(data.kind==="offer"){
+   const collision=pc.signalingState!=="stable"||pc._makingOffer;
+   const polite=socket.id>data.from;
+   if(collision&&!polite){console.info("Ignoring colliding offer",data.from);pc._ignoreOffer=true;return;}
+   pc._ignoreOffer=false;
+   await pc.setRemoteDescription(data.payload);
+   await flushCandidates(pc);
+   await pc.setLocalDescription(await pc.createAnswer());
+   socket.emit("signal",{to:data.from,kind:"answer",payload:pc.localDescription});
+  }else if(data.kind==="answer"){
+   if(pc.signalingState!=="have-local-offer"){
+    console.info("Ignoring stale answer",data.from,pc.signalingState);return;
+   }
+   await pc.setRemoteDescription(data.payload);
+   await flushCandidates(pc);
+  }else if(data.kind==="candidate"){
+   if(pc._ignoreOffer)return;
+   if(pc.remoteDescription)await pc.addIceCandidate(data.payload);
+   else{pc._pendingIce??=[];pc._pendingIce.push(data.payload);}
+  }
+  if(pc.signalingState==="stable"&&pc._offerQueued){
+   pc._offerQueued=false;await makeOffer(data.from,pc);
+  }
  }catch(e){console.warn("Signal error",e);}
 }
 function tile(id,name,stream,self=false){
