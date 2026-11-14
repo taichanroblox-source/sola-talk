@@ -67,7 +67,20 @@ async function toggleDevice(kind){
        :{audio:false,video:{width:{ideal:640},height:{ideal:360},frameRate:{ideal:15,max:20}}});
      for(const track of stream.getTracks()){local.addTrack(track);track.onended=()=>{if(local.getTracks().includes(track)){local.removeTrack(track);if(isMic)micEnabled=false;else camEnabled=false;updateDeviceUI();syncTracks();}};}
      if(isMic)micEnabled=true;else camEnabled=true;
-   }catch(e){toast((isMic?"マイク":"カメラ")+"を使えません。ブラウザの権限設定を確認してね");return;}
+   }catch(e){
+     console.warn("Media permission/device error:",e);
+     const label=isMic?"マイク":"カメラ";
+     if(e.name==="NotAllowedError"||e.name==="PermissionDeniedError"){
+       toast(label+"の使用がブロックされている可能性があるよ。アドレスバー横のサイト設定で許可してから、もう一度ONを押してね");
+     }else if(e.name==="NotFoundError"||e.name==="DevicesNotFoundError"){
+       toast(label+"が見つからないよ。Macの接続機器を確認してね");
+     }else if(e.name==="NotReadableError"||e.name==="TrackStartError"){
+       toast(label+"を別のアプリが使用中かもしれないよ。ほかのアプリを閉じて再試行してね");
+     }else{
+       toast(label+"を開始できなかったよ（"+e.name+"）。ブラウザの設定を確認してね");
+     }
+     return;
+   }
  }
  updateDeviceUI();
  await syncTracks();
@@ -152,6 +165,7 @@ function renderTiles(){
  const tiles=$("tiles");tiles.replaceChildren();
  tiles.append(tile("me",localStorage.getItem("sola-talk-name")||"自分",local,true));
  for(const [sid,name] of names){if(sid!==socket?.id)tiles.append(tile(sid,name,remoteStreams.get(sid)));}
+ if(screenStream)tiles.append(tile("screen","共有中の画面",screenStream,true));
 }
 function setupMeter(){
  if(!local||window.solaMeter)return;
@@ -164,15 +178,44 @@ function setupMeter(){
 }
 $("micBtn").onclick=()=>toggleDevice("audio");
 $("camBtn").onclick=()=>toggleDevice("video");
+async function stopScreenShare(){
+ const old=screenStream;
+ if(!old)return;
+ screenStream=null;
+ old.getTracks().forEach(t=>{t.onended=null;t.stop();});
+ for(const [sid,pc] of peers){
+   const sender=pc.getSenders().find(x=>x.track && old.getTracks().includes(x.track));
+   if(sender){pc.removeTrack(sender);await makeOffer(sid,pc);}
+ }
+ $("screenBtn").textContent="▣ 画面共有";
+ renderTiles();
+}
 $("screenBtn").onclick=async()=>{
+ if(screenStream){await stopScreenShare();return;}
+ if(!navigator.mediaDevices?.getDisplayMedia){toast("このブラウザでは画面共有できないよ。HTTPSでChromeなどを使ってね");return;}
  try{
- if(screenStream){screenStream.getTracks().forEach(t=>t.stop());screenStream=null;for(const pc of peers.values()){for(const sender of pc.getSenders()){if(sender.track?.label==="SOLA SCREEN")pc.removeTrack(sender);}}$("screenBtn").textContent="▣ 画面共有";return;}
- screenStream=await navigator.mediaDevices.getDisplayMedia({video:{width:{ideal:1280,max:1280},height:{ideal:720,max:720},frameRate:{ideal:10,max:10}},audio:false});
- const track=screenStream.getVideoTracks()[0];
- track.onended=()=>{screenStream=null;$("screenBtn").textContent="▣ 画面共有";};
- for(const [sid,pc] of peers){pc.addTrack(track,screenStream);await makeOffer(sid,pc);}
- $("screenBtn").textContent="共有停止";
- }catch(e){toast("画面共有できません: "+e.message);}
+   // getDisplayMedia must be called directly from the click handler.
+   // Avoid min/max/exact constraints: several browsers reject them.
+   const stream=await navigator.mediaDevices.getDisplayMedia({
+     video:{frameRate:{ideal:10},width:{ideal:1280},height:{ideal:720}},
+     audio:false
+   });
+   screenStream=stream;
+   const track=stream.getVideoTracks()[0];
+   if(!track)throw Error("画面が選択されませんでした");
+   track.onended=()=>{stopScreenShare().catch(console.error);};
+   try{await track.applyConstraints({frameRate:{ideal:10,max:10}});}catch(e){console.info("Screen frame rate constraint not supported",e);}
+   for(const [sid,pc] of peers){pc.addTrack(track,stream);await makeOffer(sid,pc);}
+   $("screenBtn").textContent="共有停止";
+   renderTiles();
+ }catch(e){
+   console.warn("Screen share error:",e);
+   if(e.name==="NotAllowedError"||e.name==="PermissionDeniedError"){
+     toast("画面共有が許可されなかったよ。Macの「システム設定 → プライバシーとセキュリティ → 画面収録とシステムオーディオ録音」でブラウザを許可してね");
+   }else if(e.name==="NotSupportedError"||e.name==="TypeError"){
+     toast("このブラウザでは画面共有の設定に対応していないよ。Chromeの最新版などで試してね");
+   }else{toast("画面共有できなかったよ（"+e.name+"）");}
+ }
 };
 $("chatBtn").onclick=()=>$("chatPanel").classList.toggle("hidden");
 $("inviteBtn").onclick=async()=>{try{await navigator.clipboard.writeText(shareUrl());toast("招待URLをコピーしたよ");}catch{toast(shareUrl());}};
