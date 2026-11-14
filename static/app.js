@@ -7,16 +7,10 @@ let micEnabled = true, camEnabled = true, startTime = 0, timerInterval = null;
 const peers = new Map(), remoteStreams = new Map(), names = new Map();
 const hostStorageKey = id => "sola-talk-host-" + id;
 
-const rtcConfig = {iceServers:[
- {urls:"stun:stun.l.google.com:19302"},
- {urls:"stun:stun1.l.google.com:19302"},
- {urls:"stun:stun2.l.google.com:19302"}
-]};
+const rtcConfig={iceServers:[{urls:"stun:stun.l.google.com:19302"},{urls:"stun:stun1.l.google.com:19302"}]};
 async function loadRtcConfig(){
- try{
-   const res=await fetch("/api/rtc-config",{cache:"no-store"});
-   if(res.ok){const cfg=await res.json();if(Array.isArray(cfg.iceServers)&&cfg.iceServers.length)rtcConfig.iceServers=cfg.iceServers;}
- }catch(e){console.warn("RTC config unavailable",e);}
+ try{const res=await fetch("/api/rtc-config",{cache:"no-store"});if(res.ok){const data=await res.json();if(Array.isArray(data.iceServers)&&data.iceServers.length)rtcConfig.iceServers=data.iceServers;}}
+ catch(e){console.warn("RTC config",e);}
 }
 const toast = message => { const t=$("toast"); t.textContent=message; t.style.display="block"; setTimeout(()=>{ if(t.textContent===message)t.style.display="none"; },4000); };
 const show = id => { ["home","lobby","call"].forEach(x=>$(x).classList.toggle("hidden",x!==id)); };
@@ -60,9 +54,6 @@ function updateDeviceUI(){
  $("micBtn").textContent=micEnabled?"🎙 マイクON":"🔇 マイクOFF";
  $("camBtn").textContent=camEnabled?"📷 カメラON":"📷 カメラOFF";
  $("preview").srcObject=local;
- $("preview").muted=true;
- $("preview").playsInline=true;
- if(camEnabled)$("preview").play().catch(e=>console.warn("Preview playback:",e));
  renderTiles();
 }
 async function toggleDevice(kind){
@@ -80,22 +71,7 @@ async function toggleDevice(kind){
        :{audio:false,video:true});
      for(const track of stream.getTracks()){local.addTrack(track);track.onended=()=>{if(local.getTracks().includes(track)){local.removeTrack(track);if(isMic)micEnabled=false;else camEnabled=false;updateDeviceUI();syncTracks();}};}
      if(isMic)micEnabled=true;else camEnabled=true;
-   }catch(e){
-     console.warn("Media permission/device error:",e);
-     const label=isMic?"マイク":"カメラ";
-     if(e.name==="NotAllowedError"||e.name==="PermissionDeniedError"){
-       toast(label+"の使用がブロックされている可能性があるよ。アドレスバー横のサイト設定で許可してから、もう一度ONを押してね");
-     }else if(e.name==="OverconstrainedError"){
-       toast(label+"の画質設定が端末に合わなかったよ。もう一度ONを押してね");
-     }else if(e.name==="NotFoundError"||e.name==="DevicesNotFoundError"){
-       toast(label+"が見つからないよ。Macの接続機器を確認してね");
-     }else if(e.name==="NotReadableError"||e.name==="TrackStartError"){
-       toast(label+"を別のアプリが使用中かもしれないよ。ほかのアプリを閉じて再試行してね");
-     }else{
-       toast(label+"を開始できなかったよ（"+e.name+"）。ブラウザの設定を確認してね");
-     }
-     return;
-   }
+   }catch(e){toast((isMic?"マイク":"カメラ")+"を使えません。ブラウザの権限設定を確認してね");return;}
  }
  updateDeviceUI();
  await syncTracks();
@@ -105,9 +81,9 @@ async function syncTracks(){
    const senders=pc.getSenders();
    for(const kind of ["audio","video"]){
      const track=kind==="audio"?local.getAudioTracks()[0]:local.getVideoTracks()[0];
-     const sender=senders.find(x=>x._solaKind===kind) || senders.find(x=>x.track?.kind===kind && !(screenStream && screenStream.getTracks().includes(x.track)));
+     const sender=senders.find(x=>x.track?.kind===kind && !(screenStream && screenStream.getTracks().includes(x.track)));
      if(sender){await sender.replaceTrack(track||null);}
-     else if(track){const added=pc.addTrack(track,local);added._solaKind=kind;await makeOffer(sid,pc);}
+     else if(track){pc.addTrack(track,local);await makeOffer(sid,pc);}
    }
  }
 }
@@ -148,19 +124,11 @@ function startCall(){
 }
 function createPeer(sid,initiator){
  const pc=new RTCPeerConnection(rtcConfig);peers.set(sid,pc);
- for(const kind of ["audio","video"]){const t=local?.getTracks().find(t=>t.kind===kind);const tr=pc.addTransceiver(t||kind,{direction:"sendrecv",streams:[local]});tr.sender._solaKind=kind;}
+ local?.getTracks().forEach(t=>pc.addTrack(t,local));
  if(screenStream)screenStream.getTracks().forEach(t=>pc.addTrack(t,screenStream));
  pc.onicecandidate=e=>{if(e.candidate)socket.emit("signal",{to:sid,kind:"candidate",payload:e.candidate});};
  pc.ontrack=e=>{let stream=remoteStreams.get(sid);if(!stream){stream=new MediaStream();remoteStreams.set(sid,stream);}stream.addTrack(e.track);e.track.onended=renderTiles;renderTiles();};
- pc.onconnectionstatechange=()=>{
-   $("quality").textContent=pc.connectionState;
-   if(pc.connectionState==="failed")toast("相手との通信に失敗したよ。ネットワーク接続またはTURNサーバーの設定を確認してね");
- };
- pc.oniceconnectionstatechange=()=>{
-   console.info("WebRTC ICE",sid,pc.iceConnectionState,pc.iceGatheringState);
-   if(pc.iceConnectionState==="failed")toast("映像・音声の接続に失敗したよ（ICE failed）。TURNサーバーが必要なネットワークかもしれないよ");
- };
- pc.onicecandidateerror=e=>console.warn("ICE server error",e.errorCode,e.errorText);
+ pc.onconnectionstatechange=()=>{$("quality").textContent=pc.connectionState;};
  if(initiator)makeOffer(sid,pc);
  return pc;
 }
@@ -171,18 +139,15 @@ async function handleSignal(data){
  if(!pc)pc=createPeer(data.from,false);
  if(data.kind==="offer"){
  await pc.setRemoteDescription(data.payload);
- for(const candidate of pc._pendingIce||[])await pc.addIceCandidate(candidate);
- pc._pendingIce=[];
  const ans=await pc.createAnswer();await pc.setLocalDescription(ans);
  socket.emit("signal",{to:data.from,kind:"answer",payload:pc.localDescription});
- }else if(data.kind==="answer"){await pc.setRemoteDescription(data.payload);for(const candidate of pc._pendingIce||[])await pc.addIceCandidate(candidate);pc._pendingIce=[];}
- else if(data.kind==="candidate"){if(pc.remoteDescription)await pc.addIceCandidate(data.payload);else{pc._pendingIce??=[];pc._pendingIce.push(data.payload);}}
+ }else if(data.kind==="answer"){await pc.setRemoteDescription(data.payload);}
+ else if(data.kind==="candidate"){await pc.addIceCandidate(data.payload);}
  }catch(e){console.warn("Signal error",e);}
 }
 function tile(id,name,stream,self=false){
  const node=document.createElement("div");node.className="tile";node.id="tile-"+id;
  const video=document.createElement("video");video.autoplay=true;video.playsInline=true;video.muted=self;video.srcObject=stream||null;node.append(video);
- if(stream?.getVideoTracks().length)video.addEventListener("loadedmetadata",()=>video.play().catch(e=>console.warn("Video playback:",e)),{once:true});
  const caption=document.createElement("div");caption.className="person";caption.textContent=name+(self?" (自分)":"");node.append(caption);
  if(!stream || !stream.getVideoTracks().some(t=>t.enabled && t.readyState==="live")){node.classList.add("audioOnly");const av=document.createElement("div");av.className="avatar";av.textContent="👤";node.append(av);}
  return node;
@@ -192,7 +157,6 @@ function renderTiles(){
  const tiles=$("tiles");tiles.replaceChildren();
  tiles.append(tile("me",localStorage.getItem("sola-talk-name")||"自分",local,true));
  for(const [sid,name] of names){if(sid!==socket?.id)tiles.append(tile(sid,name,remoteStreams.get(sid)));}
- if(screenStream)tiles.append(tile("screen","共有中の画面",screenStream,true));
 }
 function setupMeter(){
  if(!local||window.solaMeter)return;
@@ -205,44 +169,15 @@ function setupMeter(){
 }
 $("micBtn").onclick=()=>toggleDevice("audio");
 $("camBtn").onclick=()=>toggleDevice("video");
-async function stopScreenShare(){
- const old=screenStream;
- if(!old)return;
- screenStream=null;
- old.getTracks().forEach(t=>{t.onended=null;t.stop();});
- for(const [sid,pc] of peers){
-   const sender=pc.getSenders().find(x=>x.track && old.getTracks().includes(x.track));
-   if(sender){pc.removeTrack(sender);await makeOffer(sid,pc);}
- }
- $("screenBtn").textContent="▣ 画面共有";
- renderTiles();
-}
 $("screenBtn").onclick=async()=>{
- if(screenStream){await stopScreenShare();return;}
- if(!navigator.mediaDevices?.getDisplayMedia){toast("このブラウザでは画面共有できないよ。HTTPSでChromeなどを使ってね");return;}
  try{
-   // getDisplayMedia must be called directly from the click handler.
-   // Avoid min/max/exact constraints: several browsers reject them.
-   const stream=await navigator.mediaDevices.getDisplayMedia({
-     video:{frameRate:{ideal:10},width:{ideal:1280},height:{ideal:720}},
-     audio:false
-   });
-   screenStream=stream;
-   const track=stream.getVideoTracks()[0];
-   if(!track)throw Error("画面が選択されませんでした");
-   track.onended=()=>{stopScreenShare().catch(console.error);};
-   try{await track.applyConstraints({frameRate:{ideal:10,max:10}});}catch(e){console.info("Screen frame rate constraint not supported",e);}
-   for(const [sid,pc] of peers){pc.addTrack(track,stream);await makeOffer(sid,pc);}
-   $("screenBtn").textContent="共有停止";
-   renderTiles();
- }catch(e){
-   console.warn("Screen share error:",e);
-   if(e.name==="NotAllowedError"||e.name==="PermissionDeniedError"){
-     toast("画面共有が許可されなかったよ。Macの「システム設定 → プライバシーとセキュリティ → 画面収録とシステムオーディオ録音」でブラウザを許可してね");
-   }else if(e.name==="NotSupportedError"||e.name==="TypeError"){
-     toast("このブラウザでは画面共有の設定に対応していないよ。Chromeの最新版などで試してね");
-   }else{toast("画面共有できなかったよ（"+e.name+"）");}
- }
+ if(screenStream){screenStream.getTracks().forEach(t=>t.stop());screenStream=null;for(const pc of peers.values()){for(const sender of pc.getSenders()){if(sender.track?.label==="SOLA SCREEN")pc.removeTrack(sender);}}$("screenBtn").textContent="▣ 画面共有";return;}
+ screenStream=await navigator.mediaDevices.getDisplayMedia({video:{width:{ideal:1280,max:1280},height:{ideal:720,max:720},frameRate:{ideal:10,max:10}},audio:false});
+ const track=screenStream.getVideoTracks()[0];
+ track.onended=()=>{screenStream=null;$("screenBtn").textContent="▣ 画面共有";};
+ for(const [sid,pc] of peers){pc.addTrack(track,screenStream);await makeOffer(sid,pc);}
+ $("screenBtn").textContent="共有停止";
+ }catch(e){toast("画面共有できません: "+e.message);}
 };
 $("chatBtn").onclick=()=>$("chatPanel").classList.toggle("hidden");
 $("inviteBtn").onclick=async()=>{try{await navigator.clipboard.writeText(shareUrl());toast("招待URLをコピーしたよ");}catch{toast(shareUrl());}};
