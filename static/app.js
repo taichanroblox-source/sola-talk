@@ -50,6 +50,9 @@ function updateDeviceUI(){
  $("micBtn").textContent=micEnabled?"🎙 マイクON":"🔇 マイクOFF";
  $("camBtn").textContent=camEnabled?"📷 カメラON":"📷 カメラOFF";
  $("preview").srcObject=local;
+ $("preview").muted=true;
+ $("preview").playsInline=true;
+ if(camEnabled)$("preview").play().catch(e=>console.warn("Preview playback:",e));
  renderTiles();
 }
 async function toggleDevice(kind){
@@ -92,9 +95,9 @@ async function syncTracks(){
    const senders=pc.getSenders();
    for(const kind of ["audio","video"]){
      const track=kind==="audio"?local.getAudioTracks()[0]:local.getVideoTracks()[0];
-     const sender=senders.find(x=>x.track?.kind===kind && !(screenStream && screenStream.getTracks().includes(x.track)));
+     const sender=senders.find(x=>x._solaKind===kind) || senders.find(x=>x.track?.kind===kind && !(screenStream && screenStream.getTracks().includes(x.track)));
      if(sender){await sender.replaceTrack(track||null);}
-     else if(track){pc.addTrack(track,local);await makeOffer(sid,pc);}
+     else if(track){const added=pc.addTrack(track,local);added._solaKind=kind;await makeOffer(sid,pc);}
    }
  }
 }
@@ -116,7 +119,7 @@ function connect(name){
  socket.on("join_error",d=>{$("joinBtn").disabled=false;toast(d.error);});
  socket.on("action_error",d=>toast(d.error));
  socket.on("admitted",d=>{joined=true;isHost=d.host;roomInfo=d.room;startCall();});
- socket.on("roster",d=>{names.clear();d.members.forEach(m=>names.set(m.sid,m.name));renderTiles(); for(const m of d.members){if(m.sid!==socket.id && !peers.has(m.sid))createPeer(m.sid,true);}});
+ socket.on("roster",d=>{names.clear();d.members.forEach(m=>names.set(m.sid,m.name));renderTiles(); for(const m of d.members){if(m.sid!==socket.id && !peers.has(m.sid))createPeer(m.sid,socket.id<m.sid);}});
  socket.on("peer_joined",d=>{names.set(d.sid,d.name);beep();renderTiles();});
  socket.on("peer_left",d=>{peers.get(d.sid)?.close();peers.delete(d.sid);remoteStreams.delete(d.sid);names.delete(d.sid);beep();renderTiles();});
  socket.on("signal",handleSignal);
@@ -134,7 +137,7 @@ function startCall(){
 }
 function createPeer(sid,initiator){
  const pc=new RTCPeerConnection(rtcConfig);peers.set(sid,pc);
- local?.getTracks().forEach(t=>pc.addTrack(t,local));
+ for(const kind of ["audio","video"]){const t=local?.getTracks().find(t=>t.kind===kind);const tr=pc.addTransceiver(t||kind,{direction:"sendrecv",streams:[local]});tr.sender._solaKind=kind;}
  if(screenStream)screenStream.getTracks().forEach(t=>pc.addTrack(t,screenStream));
  pc.onicecandidate=e=>{if(e.candidate)socket.emit("signal",{to:sid,kind:"candidate",payload:e.candidate});};
  pc.ontrack=e=>{let stream=remoteStreams.get(sid);if(!stream){stream=new MediaStream();remoteStreams.set(sid,stream);}stream.addTrack(e.track);e.track.onended=renderTiles;renderTiles();};
@@ -149,15 +152,18 @@ async function handleSignal(data){
  if(!pc)pc=createPeer(data.from,false);
  if(data.kind==="offer"){
  await pc.setRemoteDescription(data.payload);
+ for(const candidate of pc._pendingIce||[])await pc.addIceCandidate(candidate);
+ pc._pendingIce=[];
  const ans=await pc.createAnswer();await pc.setLocalDescription(ans);
  socket.emit("signal",{to:data.from,kind:"answer",payload:pc.localDescription});
- }else if(data.kind==="answer"){await pc.setRemoteDescription(data.payload);}
- else if(data.kind==="candidate"){await pc.addIceCandidate(data.payload);}
+ }else if(data.kind==="answer"){await pc.setRemoteDescription(data.payload);for(const candidate of pc._pendingIce||[])await pc.addIceCandidate(candidate);pc._pendingIce=[];}
+ else if(data.kind==="candidate"){if(pc.remoteDescription)await pc.addIceCandidate(data.payload);else{pc._pendingIce??=[];pc._pendingIce.push(data.payload);}}
  }catch(e){console.warn("Signal error",e);}
 }
 function tile(id,name,stream,self=false){
  const node=document.createElement("div");node.className="tile";node.id="tile-"+id;
  const video=document.createElement("video");video.autoplay=true;video.playsInline=true;video.muted=self;video.srcObject=stream||null;node.append(video);
+ if(stream?.getVideoTracks().length)video.addEventListener("loadedmetadata",()=>video.play().catch(e=>console.warn("Video playback:",e)),{once:true});
  const caption=document.createElement("div");caption.className="person";caption.textContent=name+(self?" (自分)":"");node.append(caption);
  if(!stream || !stream.getVideoTracks().some(t=>t.enabled && t.readyState==="live")){node.classList.add("audioOnly");const av=document.createElement("div");av.className="avatar";av.textContent="👤";node.append(av);}
  return node;
