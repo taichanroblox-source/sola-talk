@@ -7,6 +7,15 @@ let micEnabled = true, camEnabled = true, startTime = 0, timerInterval = null;
 const peers = new Map(), remoteStreams = new Map(), names = new Map();
 const remoteScreens = new Map(), remoteScreenIds = new Map();
 const hostStorageKey = id => "sola-talk-host-" + id;
+const resumeKey = id => "sola-talk-resume-" + id;
+function readResume(){
+ try{return JSON.parse(sessionStorage.getItem(resumeKey(roomId))||"null");}catch{return null;}
+}
+function clearResume(){try{sessionStorage.removeItem(resumeKey(roomId));}catch{}}
+function rememberResume(name,password){
+ try{sessionStorage.setItem(resumeKey(roomId),JSON.stringify({name,password}));}catch{}
+}
+let joinPassword="";
 
 const rtcConfig={iceServers:[{urls:"stun:stun.l.google.com:19302"},{urls:"stun:stun1.l.google.com:19302"}]};
 async function loadRtcConfig(){
@@ -77,6 +86,15 @@ async function setupLobby(){
  roomInfo=await res.json();$("lobbyName").textContent=roomInfo.name;$("roomMeta").textContent=roomInfo.count+" / "+roomInfo.limit+"人";
  $("password").parentElement.classList.toggle("hidden",!!hostKey() || !roomInfo.password);
  show("lobby");
+ const resume=readResume();
+ if(resume?.name){
+  $("displayName").value=resume.name;
+  $("password").value=resume.password||"";
+  joinPassword=resume.password||"";
+  $("joinBtn").disabled=true;
+  try{await loadRtcConfig();connect(resume.name);}
+  catch(e){$("joinBtn").disabled=false;toast("再入室に失敗しました: "+e.message);}
+ }
 }
 // Permission requests happen only when the user turns a device ON.
 micEnabled=false;camEnabled=false;
@@ -127,7 +145,7 @@ $("previewCam").onclick=()=>toggleDevice("video");
 $("backBtn").onclick=()=>location.href="/";
 $("joinBtn").onclick=async ()=>{
  try {
- const name=$("displayName").value.trim()||"ゲスト";saveName();
+ const name=$("displayName").value.trim()||"ゲスト";saveName();joinPassword=$("password").value;
  $("joinBtn").disabled=true;
  await loadRtcConfig();
  connect(name);
@@ -135,12 +153,12 @@ $("joinBtn").onclick=async ()=>{
 };
 function connect(name){
  socket=io({transports:["websocket","polling"],reconnection:true});
- socket.on("connect",()=>{ $("status").textContent="接続済み"; if(!joined)socket.emit("join_call",{room_id:roomId,host_key:hostKey(),name,password:$("password").value}); });
+ socket.on("connect",()=>{ $("status").textContent="接続済み"; if(!joined)socket.emit("join_call",{room_id:roomId,host_key:hostKey(),name,password:joinPassword}); });
  socket.on("disconnect",()=>{$("status").textContent="再接続中";joined=false;for(const pc of peers.values())pc.close();peers.clear();remoteStreams.clear();remoteScreens.clear();remoteScreenIds.clear();});
  socket.on("waiting",()=>{toast("管理者の承認待ち");$("joinBtn").disabled=true;});
- socket.on("join_error",d=>{$("joinBtn").disabled=false;toast(d.error);});
+ socket.on("join_error",d=>{clearResume();$("joinBtn").disabled=false;toast(d.error);socket.disconnect();socket=null;show("lobby");});
  socket.on("action_error",d=>toast(d.error));
- socket.on("admitted",d=>{joined=true;isHost=d.host;roomInfo=d.room;startCall();});
+ socket.on("admitted",d=>{joined=true;isHost=d.host;roomInfo=d.room;rememberResume(name,joinPassword);startCall();});
  socket.on("roster",d=>{names.clear();d.members.forEach(m=>names.set(m.sid,m.name));renderTiles(); for(const m of d.members){if(m.sid!==socket.id && !peers.has(m.sid))createPeer(m.sid,socket.id<m.sid);}});
  socket.on("peer_joined",d=>{names.set(d.sid,d.name);beep("join");renderTiles();});
  socket.on("peer_left",d=>{peers.get(d.sid)?.close();peers.delete(d.sid);remoteStreams.delete(d.sid);remoteScreens.delete(d.sid);remoteScreenIds.delete(d.sid);names.delete(d.sid);beep("leave");renderTiles();});
@@ -148,7 +166,7 @@ function connect(name){
  socket.on("chat",d=>addMessage(d.name,d.text));
  socket.on("pending_requests",d=>{if(isHost)renderRequests(d.requests);});
  socket.on("room_state",d=>{roomInfo=d;$("lockBtn").textContent=d.locked?"ロック解除":"ルームをロック";});
- socket.on("removed",d=>{toast(d.reason);cleanup();setTimeout(()=>location.href="/",1000);});
+ socket.on("removed",d=>{toast(d.reason);clearResume();cleanup();setTimeout(()=>location.href="/",1000);});
 }
 function startCall(){
  show("call");$("callTitle").textContent=roomInfo.name;$("hostControls").classList.toggle("hidden",!isHost);
@@ -313,7 +331,7 @@ $("chatBtn").onclick=()=>{
  $("call").classList.toggle("chatClosed",!open);
 };
 $("inviteBtn").onclick=async()=>{try{await navigator.clipboard.writeText(shareUrl());toast("招待URLをコピーしたよ");}catch{toast(shareUrl());}};
-$("leaveBtn").onclick=()=>{if(confirm("通話から退出する？")){socket?.emit("leave_call");cleanup();location.href="/";}};
+$("leaveBtn").onclick=()=>{if(confirm("通話から退出する？")){clearResume();socket?.emit("leave_call");cleanup();location.href="/";}};
 $("chatForm").onsubmit=e=>{e.preventDefault();const val=$("chatInput").value.trim();if(val&&joined){socket.emit("chat",{text:val});$("chatInput").value="";}};
 function addMessage(name,text){const box=document.createElement("div");box.className="msg";const small=document.createElement("small");small.textContent=name;const content=document.createElement("div");content.textContent=text;box.append(small,content);$("messages").append(box);$("messages").scrollTop=$("messages").scrollHeight;beep("message");}
 function manage(action,options={}){socket.emit("manage",{room_id:roomId,host_key:hostKey(),action,...options});}
@@ -321,6 +339,6 @@ function renderRequests(requests){const box=$("requests");box.replaceChildren();
 $("lockBtn").onclick=()=>manage("lock",{value:!roomInfo.locked});
 $("endBtn").onclick=()=>{if(confirm("全員の通話を終了する？"))manage("end");};
 function cleanup(){joined=false;clearInterval(timerInterval);for(const pc of peers.values())pc.close();peers.clear();remoteScreens.clear();remoteScreenIds.clear();local?.getTracks().forEach(t=>t.stop());screenStream?.getTracks().forEach(t=>t.stop());socket?.disconnect();}
-window.addEventListener("beforeunload",()=>{if(joined)socket?.emit("leave_call");});
+window.addEventListener("beforeunload",()=>{ /* Socket.IO disconnect releases this participant; resume token remains for reload. */ });
 setupLobby();
 })();
