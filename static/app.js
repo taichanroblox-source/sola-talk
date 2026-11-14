@@ -49,7 +49,7 @@ setTheme(localStorage.getItem("sola-talk-theme")||"dark");
 $("themeBtn").onclick=()=>setTheme(document.body.classList.contains("light")?"dark":"light");
 const savedName=()=>{try{return localStorage.getItem("sola-talk-name")||"";}catch{return "";}};
 const saveName=()=>{const name=$("displayName").value.trim();try{if(name)localStorage.setItem("sola-talk-name",name);}catch(e){console.warn("Name storage",e);}};
-$("displayName").value=savedName();
+$("displayName").value="";
 $("displayName").addEventListener("input",saveName);
 $("displayName").addEventListener("change",saveName);
 $("createForm").onsubmit=async e=>{
@@ -124,7 +124,7 @@ $("previewCam").onclick=()=>toggleDevice("video");
 $("backBtn").onclick=()=>location.href="/";
 $("joinBtn").onclick=async ()=>{
  try {
- const name=$("displayName").value.trim()||savedName()||"ゲスト";saveName();
+ const name=$("displayName").value.trim()||"ゲスト";saveName();
  $("joinBtn").disabled=true;
  await loadRtcConfig();
  connect(name);
