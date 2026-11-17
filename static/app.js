@@ -16,6 +16,7 @@ function rememberResume(name,password){
  try{sessionStorage.setItem(resumeKey(roomId),JSON.stringify({name,password}));}catch{}
 }
 let joinPassword="";
+let currentDisplayName="ゲスト";
 
 const rtcConfig={iceServers:[{urls:"stun:stun.l.google.com:19302"},{urls:"stun:stun1.l.google.com:19302"}]};
 async function loadRtcConfig(){
@@ -152,12 +153,14 @@ $("joinBtn").onclick=async ()=>{
  }catch(err){toast("カメラ・マイクの許可を確認してね: "+err.message);}
 };
 function connect(name){
+ currentDisplayName=name;
  socket=io({transports:["websocket","polling"],reconnection:true});
  socket.on("connect",()=>{ $("status").textContent="接続済み"; if(!joined)socket.emit("join_call",{room_id:roomId,host_key:hostKey(),name,password:joinPassword}); });
  socket.on("disconnect",()=>{$("status").textContent="再接続中";joined=false;for(const pc of peers.values())pc.close();peers.clear();remoteStreams.clear();remoteScreens.clear();remoteScreenIds.clear();});
  socket.on("waiting",()=>{toast("管理者の承認待ち");$("joinBtn").disabled=true;});
  socket.on("join_error",d=>{clearResume();$("joinBtn").disabled=false;toast(d.error);socket.disconnect();socket=null;show("lobby");});
  socket.on("action_error",d=>toast(d.error));
+ socket.on("rename_result",d=>{if(d.ok){currentDisplayName=d.name;names.set(socket.id,d.name);$("displayName").value=d.name;saveName();rememberResume(d.name,joinPassword);renderTiles();toast("名前を変更したよ");}else toast(d.error||"名前を変更できなかったよ");});
  socket.on("admitted",d=>{joined=true;isHost=d.host;roomInfo=d.room;rememberResume(name,joinPassword);startCall();});
  socket.on("roster",d=>{names.clear();d.members.forEach(m=>names.set(m.sid,m.name));renderTiles(); for(const m of d.members){if(m.sid!==socket.id && !peers.has(m.sid))createPeer(m.sid,socket.id<m.sid);}});
  socket.on("peer_joined",d=>{names.set(d.sid,d.name);beep("join");renderTiles();});
@@ -168,6 +171,12 @@ function connect(name){
  socket.on("room_state",d=>{roomInfo=d;$("lockBtn").textContent=d.locked?"ロック解除":"ルームをロック";});
  socket.on("removed",d=>{toast(d.reason);clearResume();cleanup();setTimeout(()=>location.href="/",1000);});
 }
+$("renameBtn").onclick=()=>{
+ if(!joined||!socket?.connected)return toast("通話に接続してから変更してね");
+ const input=prompt("新しい表示名（32文字以内）",currentDisplayName);
+ if(input===null)return;
+ socket.emit("rename_self",{name:input.trim().slice(0,32)||"ゲスト"});
+};
 function startCall(){
  show("call");$("callTitle").textContent=roomInfo.name;$("hostControls").classList.toggle("hidden",!isHost);
  if(!startTime)startTime=Date.now();
@@ -277,7 +286,7 @@ function tile(id,name,stream,self=false){
 function renderTiles(){
  if(!joined)return;
  const tiles=$("tiles");tiles.replaceChildren();
- tiles.append(tile("me",$("displayName").value.trim()||"ゲスト",local,true));
+ tiles.append(tile("me",currentDisplayName,local,true));
  for(const [sid,name] of names){if(sid!==socket?.id){tiles.append(tile(sid,name,remoteStreams.get(sid)));if(remoteScreenIds.has(sid))tiles.append(tile("screen-"+sid,name+"の画面",remoteScreens.get(sid)));}}
  if(screenStream)tiles.append(tile("screen-me","自分の画面",screenStream,true));
 }
