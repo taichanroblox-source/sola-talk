@@ -284,9 +284,19 @@ async function handleSignal(data){
   }
  }catch(e){console.warn("Signal error",e);}
 }
+function playRemoteAudio(){
+ for(const video of document.querySelectorAll("#tiles video")){
+  if(video.muted || !video.srcObject || !video.srcObject.getAudioTracks().length)continue;
+  video.volume=1;
+  const p=video.play();
+  if(p?.catch)p.catch(e=>{console.warn("Remote audio playback",e);$("audioBtn").textContent="🔊 音声を再生";});
+ }
+}
+$("audioBtn").onclick=()=>{playRemoteAudio();$("audioBtn").textContent="🔊 再生を試行中";};
 function tile(id,name,stream,self=false){
  const node=document.createElement("div");node.className="tile";node.id="tile-"+id;
  const video=document.createElement("video");video.autoplay=true;video.playsInline=true;video.muted=self;video.srcObject=stream||null;node.append(video);
+ if(!self&&stream?.getAudioTracks().length){video.addEventListener("loadedmetadata",()=>video.play().catch(()=>{}),{once:true});}
  const caption=document.createElement("div");caption.className="person";caption.textContent=name+(self?" (自分)":"");node.append(caption);
  if(!stream || !stream.getVideoTracks().some(t=>t.enabled && t.readyState==="live")){node.classList.add("audioOnly");const av=document.createElement("div");av.className="avatar";av.textContent="👤";node.append(av);}
  return node;
@@ -309,7 +319,7 @@ function renderTiles(){
   if(!node){node=tile(id,name,stream,self);tiles.append(node);}
   else{
    const video=node.querySelector("video");
-   if(video && video.srcObject!==(stream||null))video.srcObject=stream||null;
+   if(video && video.srcObject!==(stream||null)){video.srcObject=stream||null;if(!self&&stream?.getAudioTracks().length)video.play().catch(()=>{});}
    const caption=node.querySelector(".person");
    if(caption)caption.textContent=name+(self?" (自分)":"");
    const hasVideo=!!stream&&stream.getVideoTracks().some(t=>t.enabled&&t.readyState==="live");
@@ -319,6 +329,7 @@ function renderTiles(){
    if(hasVideo&&avatar)avatar.remove();
   }
  }
+ playRemoteAudio();
 }
 function setupMeter(){
  if(!local||window.solaMeter)return;
