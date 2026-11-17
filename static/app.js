@@ -17,6 +17,7 @@ function rememberResume(name,password){
 }
 let joinPassword="";
 let joinWatchdog=null;
+let audioDiagnosticsTimer=null;
 function clearJoinWatchdog(){if(joinWatchdog){clearTimeout(joinWatchdog);joinWatchdog=null;}}
 function joinFailed(message){clearJoinWatchdog();$("joinBtn").disabled=false;$("status").textContent="未接続";toast(message);}
 
@@ -137,7 +138,7 @@ async function syncTracks(){
   for(const kind of ["audio","video"]){
    const track=kind==="audio"?local.getAudioTracks()[0]:local.getVideoTracks()[0];
    let sender=pc.getSenders().find(x=>x._solaKind===kind);
-   if(sender)await sender.replaceTrack(track||null);
+   if(sender){await sender.replaceTrack(track||null);if(sender.track&&sender.track.enabled===false)sender.track.enabled=true;}
    else if(track){
     sender=pc.addTrack(track,local);sender._solaKind=kind;
     await makeOffer(sid,pc);
@@ -186,6 +187,7 @@ $("renameBtn").onclick=()=>{
  socket.emit("rename_self",{name:input.trim().slice(0,32)||"ゲスト"});
 };
 function startCall(){
+ startAudioDiagnostics();
  show("call");$("callTitle").textContent=roomInfo.name;$("hostControls").classList.toggle("hidden",!isHost);
  if(!startTime)startTime=Date.now();
  clearInterval(timerInterval);
@@ -195,6 +197,31 @@ function startCall(){
 function sendScreenState(sid,active,streamId){
  if(socket?.connected)socket.emit("signal",{to:sid,kind:"screen",payload:{active,streamId:streamId||null}});
 }
+function startAudioDiagnostics(){
+ if(audioDiagnosticsTimer)clearInterval(audioDiagnosticsTimer);
+ audioDiagnosticsTimer=setInterval(async()=>{
+  if(!joined)return;
+  const parts=[];
+  for(const [sid,pc] of peers){
+   try{
+    const stats=await pc.getStats();
+    let received=0,sent=0,remoteAudio=false;
+    stats.forEach(s=>{
+     if(s.type==="inbound-rtp"&&s.kind==="audio")received+=s.bytesReceived||0;
+     if(s.type==="outbound-rtp"&&s.kind==="audio")sent+=s.bytesSent||0;
+    });
+    const stream=remoteStreams.get(sid);
+    remoteAudio=!!stream?.getAudioTracks().some(t=>t.readyState==="live");
+    const element=document.querySelector("#tile-"+sid+" audio.remote-audio");
+    const playback=element?.paused?"再生停止":"再生中";
+    parts.push((names.get(sid)||"相手")+": "+(remoteAudio?"音声トラックあり":"音声トラックなし")+" / 受信 "+received+"B / 送信 "+sent+"B / "+playback);
+   }catch(e){parts.push("音声診断に失敗: "+e.message);}
+  }
+  const own=local?.getAudioTracks()[0];
+  const selfStatus=own&&own.readyState==="live"&&own.enabled?"自分のマイク: 動作中":"自分のマイク: OFF";
+  $("audioDiagnostics").textContent=selfStatus+(parts.length?" | "+parts.join(" | "):" | 相手の接続待ち");
+ },2500);
+}
 function classifyRemoteTrack(sid,track,streamId){
  const screenId=remoteScreenIds.get(sid);
  const isScreen=track.kind==="video"&&screenId&&screenId===streamId;
@@ -202,7 +229,7 @@ function classifyRemoteTrack(sid,track,streamId){
  let stream=targetMap.get(sid);
  if(!stream){stream=new MediaStream();targetMap.set(sid,stream);}
  if(!stream.getTracks().includes(track))stream.addTrack(track);
- if(track.kind==="audio")stream.dispatchEvent(new Event("addtrack"));
+
  track.onended=()=>{stream.removeTrack(track);renderTiles();};
  renderTiles();
 }
@@ -291,6 +318,10 @@ async function handleSignal(data){
   }
  }catch(e){console.warn("Signal error",e);}
 }
+function audioOnlyStream(stream){
+ const tracks=stream?.getAudioTracks()||[];
+ return tracks.length?new MediaStream(tracks):null;
+}
 function playRemoteAudio(){
  for(const audio of document.querySelectorAll("#tiles audio.remote-audio")){
   if(!audio.srcObject?.getAudioTracks().length)continue;
@@ -324,7 +355,7 @@ function renderTiles(){
   else{
    const video=node.querySelector("video");
    if(video && video.srcObject!==(stream||null))video.srcObject=stream||null;
-   if(!self){const audio=node.querySelector("audio.remote-audio");if(audio&&audio.srcObject!==(stream||null))audio.srcObject=stream||null;}
+   if(!self){const audio=node.querySelector("audio.remote-audio");if(audio){const track=stream?.getAudioTracks()[0];if(audio._solaTrack!==track){audio._solaTrack=track||null;audio.srcObject=audioOnlyStream(stream);}}}
    const caption=node.querySelector(".person");
    if(caption)caption.textContent=name+(self?" (自分)":"");
    const hasVideo=!!stream&&stream.getVideoTracks().some(t=>t.enabled&&t.readyState==="live");
@@ -393,7 +424,7 @@ function manage(action,options={}){socket.emit("manage",{room_id:roomId,host_key
 function renderRequests(requests){const box=$("requests");box.replaceChildren();for(const r of requests){const line=document.createElement("div");line.textContent=r.name+" が参加申請中 ";const yes=document.createElement("button");yes.textContent="承認";yes.onclick=()=>manage("approve",{target:r.sid});const no=document.createElement("button");no.className="secondary";no.textContent="拒否";no.onclick=()=>manage("reject",{target:r.sid});line.append(yes,no);box.append(line);} }
 $("lockBtn").onclick=()=>manage("lock",{value:!roomInfo.locked});
 $("endBtn").onclick=()=>{if(confirm("全員の通話を終了する？"))manage("end");};
-function cleanup(){clearJoinWatchdog();joined=false;clearInterval(timerInterval);for(const pc of peers.values())pc.close();peers.clear();remoteScreens.clear();remoteScreenIds.clear();local?.getTracks().forEach(t=>t.stop());screenStream?.getTracks().forEach(t=>t.stop());socket?.disconnect();}
+function cleanup(){if(audioDiagnosticsTimer)clearInterval(audioDiagnosticsTimer);clearJoinWatchdog();joined=false;clearInterval(timerInterval);for(const pc of peers.values())pc.close();peers.clear();remoteScreens.clear();remoteScreenIds.clear();local?.getTracks().forEach(t=>t.stop());screenStream?.getTracks().forEach(t=>t.stop());socket?.disconnect();}
 window.addEventListener("beforeunload",()=>{ /* Socket.IO disconnect releases this participant; resume token remains for reload. */ });
 setupLobby();
 })();
