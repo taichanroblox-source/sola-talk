@@ -182,7 +182,7 @@ function startCall(){
  if(!startTime)startTime=Date.now();
  clearInterval(timerInterval);
  timerInterval=setInterval(()=>{const t=Math.floor((Date.now()-startTime)/1000);$("timer").textContent=String(Math.floor(t/60)).padStart(2,"0")+":"+String(t%60).padStart(2,"0");},1000);
- renderTiles();setupMeter();
+ renderTiles();if(micEnabled)setupMeter();
 }
 function sendScreenState(sid,active,streamId){
  if(socket?.connected)socket.emit("signal",{to:sid,kind:"screen",payload:{active,streamId:streamId||null}});
@@ -285,17 +285,39 @@ function tile(id,name,stream,self=false){
 }
 function renderTiles(){
  if(!joined)return;
- const tiles=$("tiles");tiles.replaceChildren();
- tiles.append(tile("me",currentDisplayName,local,true));
- for(const [sid,name] of names){if(sid!==socket?.id){tiles.append(tile(sid,name,remoteStreams.get(sid)));if(remoteScreenIds.has(sid))tiles.append(tile("screen-"+sid,name+"の画面",remoteScreens.get(sid)));}}
- if(screenStream)tiles.append(tile("screen-me","自分の画面",screenStream,true));
+ const tiles=$("tiles");
+ const desired=[["me",currentDisplayName,local,true]];
+ for(const [sid,name] of names){
+  if(sid!==socket?.id){
+   desired.push([sid,name,remoteStreams.get(sid),false]);
+   if(remoteScreenIds.has(sid))desired.push(["screen-"+sid,name+"の画面",remoteScreens.get(sid),false]);
+  }
+ }
+ if(screenStream)desired.push(["screen-me","自分の画面",screenStream,true]);
+ const wanted=new Set(desired.map(([id])=>"tile-"+id));
+ for(const node of [...tiles.children])if(!wanted.has(node.id))node.remove();
+ for(const [id,name,stream,self] of desired){
+  let node=document.getElementById("tile-"+id);
+  if(!node){node=tile(id,name,stream,self);tiles.append(node);}
+  else{
+   const video=node.querySelector("video");
+   if(video && video.srcObject!==(stream||null))video.srcObject=stream||null;
+   const caption=node.querySelector(".person");
+   if(caption)caption.textContent=name+(self?" (自分)":"");
+   const hasVideo=!!stream&&stream.getVideoTracks().some(t=>t.enabled&&t.readyState==="live");
+   node.classList.toggle("audioOnly",!hasVideo);
+   let avatar=node.querySelector(".avatar");
+   if(!hasVideo&&!avatar){avatar=document.createElement("div");avatar.className="avatar";avatar.textContent="👤";node.append(avatar);}
+   if(hasVideo&&avatar)avatar.remove();
+  }
+ }
 }
 function setupMeter(){
  if(!local||window.solaMeter)return;
  try {
  const ctx=new AudioContext(),analyser=ctx.createAnalyser(),source=ctx.createMediaStreamSource(local);
- analyser.fftSize=512;source.connect(analyser);const samples=new Uint8Array(analyser.frequencyBinCount);
- const loop=()=>{if(!joined){ctx.close();window.solaMeter=false;return;}analyser.getByteFrequencyData(samples);const avg=samples.reduce((a,b)=>a+b,0)/samples.length;$("tile-me")?.classList.toggle("speaking",avg>18&&micEnabled);requestAnimationFrame(loop);};
+ analyser.fftSize=128;source.connect(analyser);const samples=new Uint8Array(analyser.frequencyBinCount);
+ const loop=()=>{if(!joined){ctx.close();window.solaMeter=false;return;}analyser.getByteFrequencyData(samples);const avg=samples.reduce((a,b)=>a+b,0)/samples.length;$("tile-me")?.classList.toggle("speaking",avg>18&&micEnabled);setTimeout(loop,120);};
  window.solaMeter=true;loop();
  }catch{}
 }
