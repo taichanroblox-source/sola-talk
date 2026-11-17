@@ -230,6 +230,8 @@ function classifyRemoteTrack(sid,track,streamId){
  if(!stream){stream=new MediaStream();targetMap.set(sid,stream);}
  if(!stream.getTracks().includes(track))stream.addTrack(track);
 
+ track.onmute=()=>{console.info("Remote track muted",sid,track.kind);renderTiles();};
+ track.onunmute=()=>{console.info("Remote track resumed",sid,track.kind);renderTiles();};
  track.onended=()=>{stream.removeTrack(track);renderTiles();};
  renderTiles();
 }
@@ -269,6 +271,7 @@ function createPeer(sid,initiator){
   classifyRemoteTrack(sid,e.track,streamId);
  };
  pc.onconnectionstatechange=()=>{$("quality").textContent=pc.connectionState;};
+ pc.onnegotiationneeded=()=>{if(pc.signalingState==="stable"&&socket?.id<sid)makeOffer(sid,pc);};
  if(screenStream)sendScreenState(sid,true,screenStream.id);
  if(initiator)makeOffer(sid,pc);
  return pc;
@@ -298,6 +301,7 @@ async function handleSignal(data){
    const polite=socket.id>data.from;
    if(collision&&!polite){console.info("Ignoring colliding offer",data.from);pc._ignoreOffer=true;return;}
    pc._ignoreOffer=false;
+   if(collision&&polite&&pc.signalingState!=="stable")await pc.setLocalDescription({type:"rollback"});
    await pc.setRemoteDescription(data.payload);
    await flushCandidates(pc);
    await pc.setLocalDescription(await pc.createAnswer());
@@ -314,9 +318,14 @@ async function handleSignal(data){
    else{pc._pendingIce??=[];pc._pendingIce.push(data.payload);}
   }
   if(pc.signalingState==="stable"&&pc._offerQueued){
-   pc._offerQueued=false;await makeOffer(data.from,pc);
+   pc._offerQueued=false;
+   if(socket.id<data.from)await makeOffer(data.from,pc);
   }
  }catch(e){console.warn("Signal error",e);}
+}
+function videoOnlyStream(stream){
+ const tracks=stream?.getVideoTracks()||[];
+ return tracks.length?new MediaStream(tracks):null;
 }
 function audioOnlyStream(stream){
  const tracks=stream?.getAudioTracks()||[];
@@ -330,7 +339,7 @@ function playRemoteAudio(){
 }
 function tile(id,name,stream,self=false){
  const node=document.createElement("div");node.className="tile";node.id="tile-"+id;
- const video=document.createElement("video");video.autoplay=true;video.playsInline=true;video.muted=true;video.srcObject=stream||null;node.append(video);
+ const video=document.createElement("video");video.autoplay=true;video.playsInline=true;video.muted=true;video.srcObject=self?(stream||null):videoOnlyStream(stream);node.append(video);
  if(!self){const audio=document.createElement("audio");audio.className="remote-audio";audio.autoplay=true;audio.playsInline=true;audio.srcObject=stream||null;node.append(audio);}
  const caption=document.createElement("div");caption.className="person";caption.textContent=name+(self?" (自分)":"");node.append(caption);
  if(!stream || !stream.getVideoTracks().some(t=>t.enabled && t.readyState==="live")){node.classList.add("audioOnly");const av=document.createElement("div");av.className="avatar";av.textContent="👤";node.append(av);}
@@ -354,7 +363,14 @@ function renderTiles(){
   if(!node){node=tile(id,name,stream,self);tiles.append(node);}
   else{
    const video=node.querySelector("video");
-   if(video && video.srcObject!==(stream||null))video.srcObject=stream||null;
+   if(video){
+    const videoTrack=stream?.getVideoTracks()[0]||null;
+    if(video._solaTrack!==videoTrack){
+     video._solaTrack=videoTrack;
+     video.srcObject=self?(stream||null):videoOnlyStream(stream);
+     video.play().catch(e=>console.warn("Video playback",e.name));
+    }
+   }
    if(!self){const audio=node.querySelector("audio.remote-audio");if(audio){const track=stream?.getAudioTracks()[0];if(audio._solaTrack!==track){audio._solaTrack=track||null;audio.srcObject=audioOnlyStream(stream);}}}
    const caption=node.querySelector(".person");
    if(caption)caption.textContent=name+(self?" (自分)":"");
@@ -384,7 +400,7 @@ async function stopScreenShare(){
  screenStream=null;
  for(const [sid,pc] of peers){
   const sender=pc.getSenders().find(x=>x._solaScreen);
-  if(sender){pc.removeTrack(sender);sender._solaScreen=false;await makeOffer(sid,pc);}
+  if(sender){pc.removeTrack(sender);sender._solaScreen=false;if(socket.id<sid)await makeOffer(sid,pc);}
   sendScreenState(sid,false);
  }
  previous.getTracks().forEach(t=>{t.onended=null;t.stop();});
@@ -404,7 +420,7 @@ $("screenBtn").onclick=async()=>{
    sendScreenState(sid,true,captured.id);
    const sender=pc.addTrack(track,captured);
    sender._solaScreen=true;
-   await makeOffer(sid,pc);
+   if(socket.id<sid)await makeOffer(sid,pc);
   }
   $("screenBtn").textContent="共有停止";
   renderTiles();
