@@ -202,6 +202,7 @@ function classifyRemoteTrack(sid,track,streamId){
  let stream=targetMap.get(sid);
  if(!stream){stream=new MediaStream();targetMap.set(sid,stream);}
  if(!stream.getTracks().includes(track))stream.addTrack(track);
+ if(track.kind==="audio")stream.dispatchEvent(new Event("addtrack"));
  track.onended=()=>{stream.removeTrack(track);renderTiles();};
  renderTiles();
 }
@@ -223,7 +224,13 @@ function updateRemoteScreenState(sid,payload){
 }
 function createPeer(sid,initiator){
  const pc=new RTCPeerConnection(rtcConfig);peers.set(sid,pc);
- local?.getTracks().forEach(t=>{const sender=pc.addTrack(t,local);sender._solaKind=t.kind;});
+ // Reserve both media directions even if the microphone/camera is OFF at entry.
+ // Without transceivers an audio-only call can start with no SDP media sections.
+ for(const kind of ["audio","video"]){
+  const track=kind==="audio"?local?.getAudioTracks()[0]:local?.getVideoTracks()[0];
+  const transceiver=pc.addTransceiver(track||kind,{direction:"sendrecv",streams:[local]});
+  transceiver.sender._solaKind=kind;
+ }
  if(screenStream){
   const track=screenStream.getVideoTracks()[0];
   if(track){const sender=pc.addTrack(track,screenStream);sender._solaScreen=true;}
@@ -285,18 +292,15 @@ async function handleSignal(data){
  }catch(e){console.warn("Signal error",e);}
 }
 function playRemoteAudio(){
- for(const video of document.querySelectorAll("#tiles video")){
-  if(video.muted || !video.srcObject || !video.srcObject.getAudioTracks().length)continue;
-  video.volume=1;
-  const p=video.play();
-  if(p?.catch)p.catch(e=>{console.warn("Remote audio playback",e);$("audioBtn").textContent="🔊 音声を再生";});
+ for(const audio of document.querySelectorAll("#tiles audio.remote-audio")){
+  if(!audio.srcObject?.getAudioTracks().length)continue;
+  audio.play().catch(e=>console.warn("Remote audio autoplay blocked",e.name));
  }
 }
-$("audioBtn").onclick=()=>{playRemoteAudio();$("audioBtn").textContent="🔊 再生を試行中";};
 function tile(id,name,stream,self=false){
  const node=document.createElement("div");node.className="tile";node.id="tile-"+id;
- const video=document.createElement("video");video.autoplay=true;video.playsInline=true;video.muted=self;video.srcObject=stream||null;node.append(video);
- if(!self&&stream?.getAudioTracks().length){video.addEventListener("loadedmetadata",()=>video.play().catch(()=>{}),{once:true});}
+ const video=document.createElement("video");video.autoplay=true;video.playsInline=true;video.muted=true;video.srcObject=stream||null;node.append(video);
+ if(!self){const audio=document.createElement("audio");audio.className="remote-audio";audio.autoplay=true;audio.playsInline=true;audio.srcObject=stream||null;node.append(audio);}
  const caption=document.createElement("div");caption.className="person";caption.textContent=name+(self?" (自分)":"");node.append(caption);
  if(!stream || !stream.getVideoTracks().some(t=>t.enabled && t.readyState==="live")){node.classList.add("audioOnly");const av=document.createElement("div");av.className="avatar";av.textContent="👤";node.append(av);}
  return node;
@@ -319,7 +323,8 @@ function renderTiles(){
   if(!node){node=tile(id,name,stream,self);tiles.append(node);}
   else{
    const video=node.querySelector("video");
-   if(video && video.srcObject!==(stream||null)){video.srcObject=stream||null;if(!self&&stream?.getAudioTracks().length)video.play().catch(()=>{});}
+   if(video && video.srcObject!==(stream||null))video.srcObject=stream||null;
+   if(!self){const audio=node.querySelector("audio.remote-audio");if(audio&&audio.srcObject!==(stream||null))audio.srcObject=stream||null;}
    const caption=node.querySelector(".person");
    if(caption)caption.textContent=name+(self?" (自分)":"");
    const hasVideo=!!stream&&stream.getVideoTracks().some(t=>t.enabled&&t.readyState==="live");
