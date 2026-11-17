@@ -127,6 +127,20 @@ def join_call(data):
         return
     admit(request.sid, room, name, is_host)
 
+@socketio.on("rename_self")
+def rename_self(data):
+    room_id = socket_rooms.get(request.sid)
+    room = rooms.get(room_id)
+    if not room or request.sid not in room["members"]:
+        return emit("rename_result", {"ok": False, "error": "通話に参加していません"})
+    raw = (data or {}).get("name", "")
+    if not isinstance(raw, str):
+        return emit("rename_result", {"ok": False, "error": "名前を確認してね"})
+    name = raw.strip()[:32] or "ゲスト"
+    room["members"][request.sid]["name"] = name
+    socketio.emit("roster", {"members": [member_data(sid, member) for sid, member in room["members"].items()]}, to=room_id)
+    emit("rename_result", {"ok": True, "name": name})
+
 @socketio.on("manage")
 def manage(data):
     data = data or {}
