@@ -16,6 +16,10 @@ function rememberResume(name,password){
  try{sessionStorage.setItem(resumeKey(roomId),JSON.stringify({name,password}));}catch{}
 }
 let joinPassword="";
+let joinWatchdog=null;
+function clearJoinWatchdog(){if(joinWatchdog){clearTimeout(joinWatchdog);joinWatchdog=null;}}
+function joinFailed(message){clearJoinWatchdog();$("joinBtn").disabled=false;$("status").textContent="未接続";toast(message);}
+
 let currentDisplayName="ゲスト";
 
 const rtcConfig={iceServers:[{urls:"stun:stun.l.google.com:19302"},{urls:"stun:stun1.l.google.com:19302"}]};
@@ -154,14 +158,18 @@ $("joinBtn").onclick=async ()=>{
 };
 function connect(name){
  currentDisplayName=name;
- socket=io({transports:["websocket","polling"],reconnection:true});
+ socket=io({transports:["polling","websocket"],upgrade:true,reconnection:true,reconnectionDelay:1000,timeout:12000});
+ $("status").textContent="サーバーに接続中";
+ clearJoinWatchdog();
+ joinWatchdog=setTimeout(()=>{if(!joined){joinFailed("入室できませんでした。学校のネットワークやサーバーの接続を確認してね。");socket?.disconnect();socket=null;}},18000);
+ socket.on("connect_error",e=>{$("status").textContent="接続に失敗";console.warn("SOLA TALK connect error",e);});
  socket.on("connect",()=>{ $("status").textContent="接続済み"; if(!joined)socket.emit("join_call",{room_id:roomId,host_key:hostKey(),name,password:joinPassword}); });
  socket.on("disconnect",()=>{$("status").textContent="再接続中";joined=false;for(const pc of peers.values())pc.close();peers.clear();remoteStreams.clear();remoteScreens.clear();remoteScreenIds.clear();});
- socket.on("waiting",()=>{toast("管理者の承認待ち");$("joinBtn").disabled=true;});
- socket.on("join_error",d=>{clearResume();$("joinBtn").disabled=false;toast(d.error);socket.disconnect();socket=null;show("lobby");});
+ socket.on("waiting",()=>{clearJoinWatchdog();$("status").textContent="承認待ち";toast("管理者の承認待ち");$("joinBtn").disabled=true;});
+ socket.on("join_error",d=>{clearJoinWatchdog();clearResume();$("joinBtn").disabled=false;toast(d.error);socket.disconnect();socket=null;show("lobby");});
  socket.on("action_error",d=>toast(d.error));
  socket.on("rename_result",d=>{if(d.ok){currentDisplayName=d.name;names.set(socket.id,d.name);$("displayName").value=d.name;saveName();rememberResume(d.name,joinPassword);renderTiles();toast("名前を変更したよ");}else toast(d.error||"名前を変更できなかったよ");});
- socket.on("admitted",d=>{joined=true;isHost=d.host;roomInfo=d.room;rememberResume(name,joinPassword);startCall();});
+ socket.on("admitted",d=>{clearJoinWatchdog();joined=true;isHost=d.host;roomInfo=d.room;rememberResume(name,joinPassword);startCall();});
  socket.on("roster",d=>{names.clear();d.members.forEach(m=>names.set(m.sid,m.name));renderTiles(); for(const m of d.members){if(m.sid!==socket.id && !peers.has(m.sid))createPeer(m.sid,socket.id<m.sid);}});
  socket.on("peer_joined",d=>{names.set(d.sid,d.name);beep("join");renderTiles();});
  socket.on("peer_left",d=>{peers.get(d.sid)?.close();peers.delete(d.sid);remoteStreams.delete(d.sid);remoteScreens.delete(d.sid);remoteScreenIds.delete(d.sid);names.delete(d.sid);beep("leave");renderTiles();});
@@ -369,7 +377,7 @@ function manage(action,options={}){socket.emit("manage",{room_id:roomId,host_key
 function renderRequests(requests){const box=$("requests");box.replaceChildren();for(const r of requests){const line=document.createElement("div");line.textContent=r.name+" が参加申請中 ";const yes=document.createElement("button");yes.textContent="承認";yes.onclick=()=>manage("approve",{target:r.sid});const no=document.createElement("button");no.className="secondary";no.textContent="拒否";no.onclick=()=>manage("reject",{target:r.sid});line.append(yes,no);box.append(line);} }
 $("lockBtn").onclick=()=>manage("lock",{value:!roomInfo.locked});
 $("endBtn").onclick=()=>{if(confirm("全員の通話を終了する？"))manage("end");};
-function cleanup(){joined=false;clearInterval(timerInterval);for(const pc of peers.values())pc.close();peers.clear();remoteScreens.clear();remoteScreenIds.clear();local?.getTracks().forEach(t=>t.stop());screenStream?.getTracks().forEach(t=>t.stop());socket?.disconnect();}
+function cleanup(){clearJoinWatchdog();joined=false;clearInterval(timerInterval);for(const pc of peers.values())pc.close();peers.clear();remoteScreens.clear();remoteScreenIds.clear();local?.getTracks().forEach(t=>t.stop());screenStream?.getTracks().forEach(t=>t.stop());socket?.disconnect();}
 window.addEventListener("beforeunload",()=>{ /* Socket.IO disconnect releases this participant; resume token remains for reload. */ });
 setupLobby();
 })();
