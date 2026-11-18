@@ -135,16 +135,27 @@ async function toggleDevice(kind){
 }
 async function syncTracks(){
  for(const [sid,pc] of peers){
+  let changed=false;
   for(const kind of ["audio","video"]){
    const track=kind==="audio"?local.getAudioTracks()[0]:local.getVideoTracks()[0];
    let sender=pc.getSenders().find(x=>x._solaKind===kind);
-   if(sender){await sender.replaceTrack(track||null);if(sender.track&&sender.track.enabled===false)sender.track.enabled=true;}
-   else if(track){
-    sender=pc.addTrack(track,local);sender._solaKind=kind;
-    await makeOffer(sid,pc);
-   }
+   try{
+    if(sender){
+     if(sender.track!==track){await sender.replaceTrack(track||null);changed=true;}
+    }else if(track){
+     sender=pc.addTrack(track,local);sender._solaKind=kind;changed=true;
+    }
+   }catch(e){console.warn("Media track update failed",kind,e);toast(kind==="video"?"カメラの送信に失敗したよ":"マイクの送信に失敗したよ");}
   }
+  // Safari can need a new SDP exchange when a previously empty sender
+  // gets its first camera or microphone track.
+  if(changed)requestRenegotiation(sid,pc);
  }
+}
+function requestRenegotiation(sid,pc){
+ if(!socket?.connected||pc.signalingState==="closed")return;
+ if(socket.id<sid)makeOffer(sid,pc);
+ else socket.emit("signal",{to:sid,kind:"renegotiate",payload:null});
 }
 $("previewMic").onclick=()=>toggleDevice("audio");
 $("previewCam").onclick=()=>toggleDevice("video");
@@ -317,6 +328,7 @@ async function handleSignal(data){
   if(data.kind==="screen"){updateRemoteScreenState(data.from,data.payload);return;}
   let pc=peers.get(data.from);
   if(!pc)pc=createPeer(data.from,false);
+  if(data.kind==="renegotiate"){if(socket.id<data.from)await makeOffer(data.from,pc);return;}
   if(data.kind==="offer"){
    const collision=pc.signalingState!=="stable"||pc._makingOffer;
    const polite=socket.id>data.from;
@@ -366,7 +378,7 @@ function tile(id,name,stream,self=false){
  video.addEventListener("loadedmetadata",()=>video.play().catch(()=>{}));
  video.addEventListener("stalled",()=>{if(video.srcObject)video.play().catch(()=>{});});
  node.append(video);
- if(!self){const audio=document.createElement("audio");audio.className="remote-audio";audio.autoplay=true;audio.playsInline=true;audio.srcObject=stream||null;node.append(audio);}
+ if(!self){const audio=document.createElement("audio");audio.className="remote-audio";audio.autoplay=true;audio.playsInline=true;audio._solaTrack=stream?.getAudioTracks()[0]||null;audio.srcObject=audioOnlyStream(stream);node.append(audio);}
  const caption=document.createElement("div");caption.className="person";caption.textContent=name+(self?" (自分)":"");node.append(caption);
  if(!stream || !stream.getVideoTracks().some(t=>t.enabled && t.readyState==="live"&&!t.muted)){node.classList.add("audioOnly");const av=document.createElement("div");av.className="avatar";av.textContent="👤";node.append(av);}
  return node;
