@@ -174,7 +174,12 @@ function connect(name){
  socket.on("roster",d=>{names.clear();d.members.forEach(m=>names.set(m.sid,m.name));renderTiles(); for(const m of d.members){if(m.sid!==socket.id && !peers.has(m.sid))createPeer(m.sid,socket.id<m.sid);}});
  socket.on("peer_joined",d=>{names.set(d.sid,d.name);beep("join");renderTiles();});
  socket.on("peer_left",d=>{peers.get(d.sid)?.close();peers.delete(d.sid);remoteStreams.delete(d.sid);remoteScreens.delete(d.sid);remoteScreenIds.delete(d.sid);names.delete(d.sid);beep("leave");renderTiles();});
- socket.on("signal",handleSignal);
+ socket.on("signal",data=>{
+  if(data.kind==="screen"){handleSignal(data);return;}
+  let pc=peers.get(data.from);
+  if(!pc)pc=createPeer(data.from,false);
+  pc._signalQueue=pc._signalQueue.then(()=>handleSignal(data)).catch(e=>console.warn("Signal queue error",e));
+ });
  socket.on("chat",d=>addMessage(d.name,d.text));
  socket.on("pending_requests",d=>{if(isHost)renderRequests(d.requests);});
  socket.on("room_state",d=>{roomInfo=d;$("lockBtn").textContent=d.locked?"ロック解除":"ルームをロック";});
@@ -253,6 +258,7 @@ function updateRemoteScreenState(sid,payload){
 }
 function createPeer(sid,initiator){
  const pc=new RTCPeerConnection(rtcConfig);peers.set(sid,pc);
+ pc._signalQueue=Promise.resolve();
  // Reserve both media directions even if the microphone/camera is OFF at entry.
  // Without transceivers an audio-only call can start with no SDP media sections.
  for(const kind of ["audio","video"]){
@@ -271,9 +277,9 @@ function createPeer(sid,initiator){
   classifyRemoteTrack(sid,e.track,streamId);
  };
  pc.onconnectionstatechange=()=>{$("quality").textContent=pc.connectionState;};
- pc.onnegotiationneeded=()=>{if(pc.signalingState==="stable"&&socket?.id<sid)makeOffer(sid,pc);};
+ pc.onnegotiationneeded=()=>{if(socket?.id<sid)makeOffer(sid,pc);};
  if(screenStream)sendScreenState(sid,true,screenStream.id);
- if(initiator)makeOffer(sid,pc);
+ if(initiator)queueMicrotask(()=>makeOffer(sid,pc));
  return pc;
 }
 async function makeOffer(sid,pc){
@@ -339,10 +345,15 @@ function playRemoteAudio(){
 }
 function tile(id,name,stream,self=false){
  const node=document.createElement("div");node.className="tile";node.id="tile-"+id;
- const video=document.createElement("video");video.autoplay=true;video.playsInline=true;video.muted=true;video.srcObject=self?(stream||null):videoOnlyStream(stream);node.append(video);
+ const video=document.createElement("video");video.autoplay=true;video.playsInline=true;video.muted=true;
+ video._solaTrack=stream?.getVideoTracks()[0]||null;
+ video.srcObject=self?(stream||null):videoOnlyStream(stream);
+ video.addEventListener("loadedmetadata",()=>video.play().catch(()=>{}));
+ video.addEventListener("stalled",()=>{if(video.srcObject)video.play().catch(()=>{});});
+ node.append(video);
  if(!self){const audio=document.createElement("audio");audio.className="remote-audio";audio.autoplay=true;audio.playsInline=true;audio.srcObject=stream||null;node.append(audio);}
  const caption=document.createElement("div");caption.className="person";caption.textContent=name+(self?" (自分)":"");node.append(caption);
- if(!stream || !stream.getVideoTracks().some(t=>t.enabled && t.readyState==="live")){node.classList.add("audioOnly");const av=document.createElement("div");av.className="avatar";av.textContent="👤";node.append(av);}
+ if(!stream || !stream.getVideoTracks().some(t=>t.enabled && t.readyState==="live"&&!t.muted)){node.classList.add("audioOnly");const av=document.createElement("div");av.className="avatar";av.textContent="👤";node.append(av);}
  return node;
 }
 function renderTiles(){
@@ -368,13 +379,13 @@ function renderTiles(){
     if(video._solaTrack!==videoTrack){
      video._solaTrack=videoTrack;
      video.srcObject=self?(stream||null):videoOnlyStream(stream);
-     video.play().catch(e=>console.warn("Video playback",e.name));
+     if(videoTrack)video.play().catch(e=>console.warn("Video playback",e.name));
     }
    }
    if(!self){const audio=node.querySelector("audio.remote-audio");if(audio){const track=stream?.getAudioTracks()[0];if(audio._solaTrack!==track){audio._solaTrack=track||null;audio.srcObject=audioOnlyStream(stream);}}}
    const caption=node.querySelector(".person");
    if(caption)caption.textContent=name+(self?" (自分)":"");
-   const hasVideo=!!stream&&stream.getVideoTracks().some(t=>t.enabled&&t.readyState==="live");
+   const hasVideo=!!stream&&stream.getVideoTracks().some(t=>t.enabled&&t.readyState==="live"&&!t.muted);
    node.classList.toggle("audioOnly",!hasVideo);
    let avatar=node.querySelector(".avatar");
    if(!hasVideo&&!avatar){avatar=document.createElement("div");avatar.className="avatar";avatar.textContent="👤";node.append(avatar);}
