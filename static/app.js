@@ -9,11 +9,11 @@ const remoteScreens = new Map(), remoteScreenIds = new Map();
 const hostStorageKey = id => "sola-talk-host-" + id;
 const resumeKey = id => "sola-talk-resume-" + id;
 function readResume(){
- try{return JSON.parse(sessionStorage.getItem(resumeKey(roomId))||"null");}catch{return null;}
+ try{return JSON.parse(localStorage.getItem(resumeKey(roomId))||"null");}catch{return null;}
 }
-function clearResume(){try{sessionStorage.removeItem(resumeKey(roomId));}catch{}}
+function clearResume(){try{localStorage.removeItem(resumeKey(roomId));}catch{}}
 function rememberResume(name,password){
- try{sessionStorage.setItem(resumeKey(roomId),JSON.stringify({name,password}));}catch{}
+ try{localStorage.setItem(resumeKey(roomId),JSON.stringify({name,password}));}catch{}
 }
 let joinPassword="";
 let joinWatchdog=null;
@@ -58,13 +58,13 @@ function beep(type="message"){
  }catch(e){console.warn("Notification sound",e);}
 }
 const shareUrl = () => location.origin + "/r/" + roomId;
-const hostKey = () => sessionStorage.getItem(hostStorageKey(roomId)) || "";
+const hostKey = () => localStorage.getItem(hostStorageKey(roomId)) || sessionStorage.getItem(hostStorageKey(roomId)) || "";
 const setTheme = val => {document.body.classList.toggle("light",val==="light");localStorage.setItem("sola-talk-theme",val);};
 setTheme(localStorage.getItem("sola-talk-theme")||"dark");
 $("themeBtn").onclick=()=>setTheme(document.body.classList.contains("light")?"dark":"light");
 const savedName=()=>{try{return localStorage.getItem("sola-talk-name")||"";}catch{return "";}};
 const saveName=()=>{const name=$("displayName").value.trim();try{if(name)localStorage.setItem("sola-talk-name",name);}catch(e){console.warn("Name storage",e);}};
-$("displayName").value="";
+$("displayName").value=savedName();
 const nameHint=$("displayName").getAttribute("placeholder")||"";
 $("displayName").addEventListener("focus",()=>{$("displayName").placeholder="";});
 $("displayName").addEventListener("blur",()=>{if(!$("displayName").value)$("displayName").placeholder=nameHint;});
@@ -75,7 +75,7 @@ $("createForm").onsubmit=async e=>{
  try{
  const res=await fetch("/api/rooms",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name:$("roomName").value,password:$("newPassword").value,limit:+$("roomLimit").value,approval:$("approval").checked})});
  const data=await res.json();if(!res.ok)throw Error(data.error);
- sessionStorage.setItem(hostStorageKey(data.room.id),data.host_key);location.href=data.url;
+ localStorage.setItem(hostStorageKey(data.room.id),data.host_key);location.href=data.url;
  }catch(err){toast(err.message);}
 };
 $("joinForm").onsubmit=e=>{
@@ -92,6 +92,7 @@ async function setupLobby(){
  roomInfo=await res.json();$("lobbyName").textContent=roomInfo.name;$("roomMeta").textContent=roomInfo.count+" / "+roomInfo.limit+"人";
  $("password").parentElement.classList.toggle("hidden",!!hostKey() || !roomInfo.password);
  show("lobby");
+ if(!$("displayName").value)$("displayName").value=savedName();
  const resume=readResume();
  if(resume?.name){
   $("displayName").value=resume.name;
@@ -162,7 +163,7 @@ $("previewCam").onclick=()=>toggleDevice("video");
 $("backBtn").onclick=()=>location.href="/";
 $("joinBtn").onclick=async ()=>{
  try {
- const name=$("displayName").value.trim()||"ゲスト";saveName();joinPassword=$("password").value;
+ const name=$("displayName").value.trim()||savedName()||"ゲスト";saveName();joinPassword=$("password").value;
  $("joinBtn").disabled=true;
  await loadRtcConfig();
  connect(name);
