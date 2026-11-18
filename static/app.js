@@ -204,27 +204,42 @@ function sendScreenState(sid,active,streamId){
 }
 function startAudioDiagnostics(){
  if(audioDiagnosticsTimer)clearInterval(audioDiagnosticsTimer);
+ const last=new Map();
  audioDiagnosticsTimer=setInterval(async()=>{
   if(!joined)return;
-  const parts=[];
+  const lines=[];
+  const ownVideo=local?.getVideoTracks()[0];
+  lines.push("自分のカメラ: "+(ownVideo?.readyState==="live"&&ownVideo.enabled?"ON":"OFF"));
   for(const [sid,pc] of peers){
    try{
     const stats=await pc.getStats();
-    let received=0,sent=0,remoteAudio=false;
+    const totals={audioIn:0,audioOut:0,videoIn:0,videoOut:0,framesIn:0,framesOut:0};
     stats.forEach(s=>{
-     if(s.type==="inbound-rtp"&&s.kind==="audio")received+=s.bytesReceived||0;
-     if(s.type==="outbound-rtp"&&s.kind==="audio")sent+=s.bytesSent||0;
+     const kind=s.kind||s.mediaType;
+     if(kind!=="audio"&&kind!=="video")return;
+     if(s.type==="inbound-rtp"){
+      totals[kind==="audio"?"audioIn":"videoIn"]+=s.bytesReceived||0;
+      if(kind==="video")totals.framesIn+=s.framesDecoded||0;
+     }
+     if(s.type==="outbound-rtp"){
+      totals[kind==="audio"?"audioOut":"videoOut"]+=s.bytesSent||0;
+      if(kind==="video")totals.framesOut+=s.framesEncoded||0;
+     }
     });
+    const old=last.get(sid)||totals;
+    const rate=(key)=>Math.max(0,Math.round((totals[key]-old[key])/2.5/1024));
     const stream=remoteStreams.get(sid);
-    remoteAudio=!!stream?.getAudioTracks().some(t=>t.readyState==="live");
-    const element=document.querySelector("#tile-"+sid+" audio.remote-audio");
-    const playback=element?.paused?"再生停止":"再生中";
-    parts.push((names.get(sid)||"相手")+": "+(remoteAudio?"音声トラックあり":"音声トラックなし")+" / 受信 "+received+"B / 送信 "+sent+"B / "+playback);
-   }catch(e){parts.push("音声診断に失敗: "+e.message);}
+    const track=stream?.getVideoTracks()[0];
+    const video=document.querySelector("#tile-"+sid+" video");
+    const sending=pc.getSenders().find(s=>s._solaKind==="video")?.track;
+    const received=rate("videoIn"),sent=rate("videoOut");
+    const videoState=!track?"映像トラックなし":track.muted?"映像停止中":video?.readyState>=2?"映像再生可能":"映像読み込み中";
+    lines.push((names.get(sid)||"相手")+" ("+pc.connectionState+"): 映像送信 "+sent+"KB/s・受信 "+received+"KB/s / "+videoState+" / 送信カメラ "+(sending?.readyState==="live"?"ON":"OFF"));
+    last.set(sid,totals);
+   }catch(e){lines.push("映像診断エラー: "+e.message);}
   }
-  const own=local?.getAudioTracks()[0];
-  const selfStatus=own&&own.readyState==="live"&&own.enabled?"自分のマイク: 動作中":"自分のマイク: OFF";
-  $("audioDiagnostics").textContent=selfStatus+(parts.length?" | "+parts.join(" | "):" | 相手の接続待ち");
+  const box=$("audioDiagnostics");
+  if(box)box.textContent=lines.join(" | ");
  },2500);
 }
 function classifyRemoteTrack(sid,track,streamId){
