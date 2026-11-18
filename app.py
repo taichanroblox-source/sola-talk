@@ -1,6 +1,9 @@
 import os
 import secrets
 import time
+import threading
+import json
+import psycopg
 from collections import defaultdict
 from flask import Flask, jsonify, render_template, request
 from flask_socketio import SocketIO, emit, join_room, leave_room
@@ -9,6 +12,47 @@ app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", secrets.token_hex(32))
 socketio = SocketIO(app, cors_allowed_origins=None, async_mode="threading")
 rooms = {}
+db_lock = threading.RLock()
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+
+def db_connect():
+    if not DATABASE_URL:
+        return None
+    return psycopg.connect(DATABASE_URL, connect_timeout=8)
+
+def init_db():
+    if not DATABASE_URL:
+        app.logger.warning("DATABASE_URL is not configured: rooms will not survive redeploys")
+        return
+    with db_connect() as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS sola_talk_rooms (
+            id TEXT PRIMARY KEY, data JSONB NOT NULL, updated_at DOUBLE PRECISION NOT NULL
+        )""")
+        rows = conn.execute("SELECT id, data FROM sola_talk_rooms").fetchall()
+    with db_lock:
+        for room_id, data in rows:
+            data = dict(data)
+            data["members"] = {}
+            data["pending"] = {}
+            data["empty_since"] = data.get("empty_since") or time.time()
+            rooms[room_id] = data
+
+def save_room(room):
+    if not DATABASE_URL:
+        return
+    data = {k:v for k,v in room.items() if k not in ("members", "pending")}
+    with db_connect() as conn:
+        conn.execute("""INSERT INTO sola_talk_rooms (id,data,updated_at)
+            VALUES (%s,%s::jsonb,%s)
+            ON CONFLICT(id) DO UPDATE SET data=EXCLUDED.data,updated_at=EXCLUDED.updated_at""",
+            (room["id"], json.dumps(data), time.time()))
+
+def delete_room(room_id):
+    if not DATABASE_URL:
+        return
+    with db_connect() as conn:
+        conn.execute("DELETE FROM sola_talk_rooms WHERE id=%s", (room_id,))
+
 socket_rooms = {}
 MAX_PEERS = 5
 EMPTY_ROOM_TTL = 30 * 60
@@ -19,6 +63,7 @@ def prune_empty_rooms():
         empty_since = room.get("empty_since")
         if not room["members"] and empty_since is not None and now - empty_since >= EMPTY_ROOM_TTL:
             rooms.pop(room_id, None)
+            delete_room(room_id)
 
 
 def info(room):
@@ -74,6 +119,7 @@ def create_room():
         "locked": False, "members": {}, "pending": {},
         "created": time.time(), "empty_since": time.time()
     }
+    save_room(rooms[room_id])
     return jsonify(room=info(rooms[room_id]), host_key=host_key, url=f"/r/{room_id}")
 
 @app.get("/api/rooms/<room_id>")
@@ -162,6 +208,7 @@ def manage(data):
         evict(target, room)
     elif action == "lock":
         room["locked"] = bool(data.get("value"))
+        save_room(room)
         socketio.emit("room_state", info(room), to=room["id"])
     elif action == "end":
         socketio.emit("removed", {"reason": "管理者が通話を終了しました"}, to=room["id"])
@@ -169,6 +216,7 @@ def manage(data):
             socket_rooms.pop(sid, None)
             leave_room(room["id"], sid=sid)
         rooms.pop(room["id"], None)
+        delete_room(room["id"])
         return
     else:
         return emit("action_error", {"error": "操作ができません"})
@@ -190,7 +238,7 @@ def signal(data):
     room_id = socket_rooms.get(request.sid)
     room = rooms.get(room_id)
     target = str(data.get("to") or "")
-    if not room or target not in room["members"] or data.get("kind") not in ("offer", "answer", "candidate", "screen"):
+    if not room or target not in room["members"] or data.get("kind") not in ("offer", "answer", "candidate", "screen", "renegotiate"):
         return
     socketio.emit("signal", {"from": request.sid, "kind": data["kind"], "payload": data.get("payload")}, to=target)
 
@@ -220,6 +268,12 @@ def disconnect_user(sid):
         if sid in room["pending"]:
             room["pending"].pop(sid, None)
             socketio.emit("pending_requests", {"requests": [{"sid": x, "name": n} for x, n in room["pending"].items()]}, to=room["id"])
+
+try:
+    init_db()
+except Exception:
+    app.logger.exception("Could not initialize persistent room storage")
+    raise
 
 if __name__ == "__main__":
     socketio.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), allow_unsafe_werkzeug=True)
