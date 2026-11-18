@@ -119,7 +119,7 @@ async function toggleDevice(kind){
  const active=isMic?micEnabled:camEnabled;
  const tracks=isMic?local.getAudioTracks():local.getVideoTracks();
  if(active){
-   tracks.forEach(t=>{t.stop();local.removeTrack(t);});
+   tracks.forEach(t=>{local.removeTrack(t);t.stop();});
    if(isMic)micEnabled=false;else camEnabled=false;
  }else{
    if(!navigator.mediaDevices?.getUserMedia){toast("HTTPSまたはlocalhostで開いてね");return;}
@@ -142,7 +142,10 @@ async function syncTracks(){
    let sender=pc.getSenders().find(x=>x._solaKind===kind);
    try{
     if(sender){
-     if(sender.track!==track){await sender.replaceTrack(track||null);changed=true;}
+     if(sender.track!==track){
+      await sender.replaceTrack(track||null);
+      changed=true;
+     }
     }else if(track){
      sender=pc.addTrack(track,local);sender._solaKind=kind;changed=true;
     }
@@ -224,8 +227,8 @@ function startAudioDiagnostics(){
  audioDiagnosticsTimer=setInterval(async()=>{
   if(!joined)return;
   const lines=[];
-  const ownVideo=local?.getVideoTracks()[0];
-  lines.push("自分のカメラ: "+(ownVideo?.readyState==="live"&&ownVideo.enabled?"ON":"OFF"));
+  const ownVideo=local?.getVideoTracks()[0],ownAudio=local?.getAudioTracks()[0];
+  lines.push("自分のマイク: "+(ownAudio?.readyState==="live"&&ownAudio.enabled?"ON":"OFF")+" / カメラ: "+(ownVideo?.readyState==="live"&&ownVideo.enabled?"ON":"OFF"));
   for(const [sid,pc] of peers){
    try{
     const stats=await pc.getStats();
@@ -249,8 +252,10 @@ function startAudioDiagnostics(){
     const video=document.querySelector("#tile-"+sid+" video");
     const sending=pc.getSenders().find(s=>s._solaKind==="video")?.track;
     const received=rate("videoIn"),sent=rate("videoOut");
+    const remoteAudio=document.querySelector("#tile-"+sid+" audio.remote-audio");
+    const audioSender=pc.getSenders().find(s=>s._solaKind==="audio")?.track;
     const videoState=!track?"映像トラックなし":track.muted?"映像停止中":video?.readyState>=2?"映像再生可能":"映像読み込み中";
-    lines.push((names.get(sid)||"相手")+" ("+pc.connectionState+"): 映像送信 "+sent+"KB/s・受信 "+received+"KB/s / "+videoState+" / 送信カメラ "+(sending?.readyState==="live"?"ON":"OFF"));
+    lines.push((names.get(sid)||"相手")+" ("+pc.connectionState+"): 音声送信 "+rate("audioOut")+"KB/s・受信 "+rate("audioIn")+"KB/s / "+(remoteAudio?.paused?"再生停止":"再生中")+" / マイク送信 "+(audioSender?.readyState==="live"&&audioSender.enabled?"ON":"OFF")+" | 映像送信 "+sent+"KB/s・受信 "+received+"KB/s / "+videoState+" / 送信カメラ "+(sending?.readyState==="live"?"ON":"OFF"));
     last.set(sid,totals);
    }catch(e){lines.push("映像診断エラー: "+e.message);}
   }
@@ -267,7 +272,7 @@ function classifyRemoteTrack(sid,track,streamId){
  if(!stream.getTracks().includes(track))stream.addTrack(track);
 
  track.onmute=()=>{console.info("Remote track muted",sid,track.kind);renderTiles();};
- track.onunmute=()=>{console.info("Remote track resumed",sid,track.kind);renderTiles();};
+ track.onunmute=()=>{console.info("Remote track resumed",sid,track.kind);renderTiles();if(track.kind==="audio")playRemoteAudio();};
  track.onended=()=>{stream.removeTrack(track);renderTiles();};
  renderTiles();
 }
@@ -385,9 +390,13 @@ function audioOnlyStream(stream){
 function playRemoteAudio(){
  for(const audio of document.querySelectorAll("#tiles audio.remote-audio")){
   if(!audio.srcObject?.getAudioTracks().length)continue;
-  audio.play().catch(e=>console.warn("Remote audio autoplay blocked",e.name));
+  audio.muted=false;
+  audio.volume=1;
+  if(audio.paused)audio.play().catch(e=>console.warn("Remote audio autoplay blocked",e.name));
  }
 }
+document.addEventListener("pointerdown",()=>{if(joined)playRemoteAudio();},{passive:true});
+document.addEventListener("keydown",()=>{if(joined)playRemoteAudio();});
 function tile(id,name,stream,self=false){
  const node=document.createElement("div");node.className="tile";node.id="tile-"+id;
  const video=document.createElement("video");video.autoplay=true;video.playsInline=true;video.muted=true;
@@ -396,7 +405,10 @@ function tile(id,name,stream,self=false){
  video.addEventListener("loadedmetadata",()=>video.play().catch(()=>{}));
  video.addEventListener("stalled",()=>{if(video.srcObject)video.play().catch(()=>{});});
  node.append(video);
- if(!self){const audio=document.createElement("audio");audio.className="remote-audio";audio.autoplay=true;audio.playsInline=true;audio._solaTrack=stream?.getAudioTracks()[0]||null;audio.srcObject=audioOnlyStream(stream);node.append(audio);}
+ if(!self){const audio=document.createElement("audio");audio.className="remote-audio";audio.autoplay=true;audio.playsInline=true;audio._solaTrack=stream?.getAudioTracks()[0]||null;audio.srcObject=audioOnlyStream(stream);
+ audio.addEventListener("loadedmetadata",playRemoteAudio);
+ audio.addEventListener("canplay",playRemoteAudio);
+ node.append(audio);}
  const caption=document.createElement("div");caption.className="person";caption.textContent=name+(self?" (自分)":"");node.append(caption);
  if(!stream || !stream.getVideoTracks().some(t=>t.enabled && t.readyState==="live"&&!t.muted)){node.classList.add("audioOnly");const av=document.createElement("div");av.className="avatar";av.textContent="👤";node.append(av);}
  return node;
@@ -427,7 +439,7 @@ function renderTiles(){
      if(videoTrack)video.play().catch(e=>console.warn("Video playback",e.name));
     }
    }
-   if(!self){const audio=node.querySelector("audio.remote-audio");if(audio){const track=stream?.getAudioTracks()[0];if(audio._solaTrack!==track){audio._solaTrack=track||null;audio.srcObject=audioOnlyStream(stream);}}}
+   if(!self){const audio=node.querySelector("audio.remote-audio");if(audio){const track=stream?.getAudioTracks()[0];if(audio._solaTrack!==track){audio._solaTrack=track||null;audio.srcObject=audioOnlyStream(stream);if(track)audio.play().catch(e=>console.warn("Audio playback",e.name));}}}
    const caption=node.querySelector(".person");
    if(caption)caption.textContent=name+(self?" (自分)":"");
    const hasVideo=!!stream&&stream.getVideoTracks().some(t=>t.enabled&&t.readyState==="live"&&!t.muted);
