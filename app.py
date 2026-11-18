@@ -61,7 +61,7 @@ def prune_empty_rooms():
     now = time.time()
     for room_id, room in list(rooms.items()):
         empty_since = room.get("empty_since")
-        if not room["members"] and empty_since is not None and now - empty_since >= EMPTY_ROOM_TTL:
+        if not DATABASE_URL and not room["members"] and empty_since is not None and now - empty_since >= EMPTY_ROOM_TTL:
             rooms.pop(room_id, None)
             delete_room(room_id)
 
