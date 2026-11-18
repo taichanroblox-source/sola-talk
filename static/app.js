@@ -184,7 +184,11 @@ function connect(name){
  socket.on("rename_result",d=>{if(d.ok){currentDisplayName=d.name;names.set(socket.id,d.name);$("displayName").value=d.name;saveName();rememberResume(d.name,joinPassword);renderTiles();toast("名前を変更したよ");}else toast(d.error||"名前を変更できなかったよ");});
  socket.on("admitted",d=>{clearJoinWatchdog();joined=true;isHost=d.host;roomInfo=d.room;rememberResume(name,joinPassword);startCall();});
  socket.on("roster",d=>{names.clear();d.members.forEach(m=>names.set(m.sid,m.name));renderTiles(); for(const m of d.members){if(m.sid!==socket.id && !peers.has(m.sid))createPeer(m.sid,socket.id<m.sid);}});
- socket.on("peer_joined",d=>{names.set(d.sid,d.name);beep("join");renderTiles();});
+ socket.on("peer_joined",d=>{
+  names.set(d.sid,d.name);
+  if(d.sid!==socket.id&&!peers.has(d.sid))createPeer(d.sid,socket.id<d.sid);
+  beep("join");renderTiles();
+ });
  socket.on("peer_left",d=>{peers.get(d.sid)?.close();peers.delete(d.sid);remoteStreams.delete(d.sid);remoteScreens.delete(d.sid);remoteScreenIds.delete(d.sid);names.delete(d.sid);beep("leave");renderTiles();});
  socket.on("signal",data=>{
   if(data.kind==="screen"){handleSignal(data);return;}
@@ -303,20 +307,32 @@ function createPeer(sid,initiator){
   e.track._solaStreamId=streamId;
   classifyRemoteTrack(sid,e.track,streamId);
  };
- pc.onconnectionstatechange=()=>{$("quality").textContent=pc.connectionState;};
- pc.onnegotiationneeded=()=>{if(socket?.id<sid)makeOffer(sid,pc);};
+ pc.onconnectionstatechange=()=>{
+  $("quality").textContent=pc.connectionState;
+  if(pc.connectionState==="failed"&&socket?.id<sid){
+   try{pc.restartIce();requestRenegotiation(sid,pc);}catch(e){console.warn("ICE restart",e);}
+  }
+ };
+ pc.onnegotiationneeded=()=>requestRenegotiation(sid,pc);
  if(screenStream)sendScreenState(sid,true,screenStream.id);
- if(initiator)queueMicrotask(()=>makeOffer(sid,pc));
+ if(initiator)queueMicrotask(()=>requestRenegotiation(sid,pc));
  return pc;
 }
 async function makeOffer(sid,pc){
+ if(pc.signalingState==="closed"||!socket?.connected)return;
  if(pc.signalingState!=="stable" || pc._makingOffer){pc._offerQueued=true;return;}
  pc._makingOffer=true;
  try{
   await pc.setLocalDescription(await pc.createOffer());
   socket.emit("signal",{to:sid,kind:"offer",payload:pc.localDescription});
  }catch(e){console.warn("Offer error",e);}
- finally{pc._makingOffer=false;}
+ finally{
+  pc._makingOffer=false;
+  if(pc._offerQueued&&pc.signalingState==="stable"){
+   pc._offerQueued=false;
+   queueMicrotask(()=>requestRenegotiation(sid,pc));
+  }
+ }
 }
 async function flushCandidates(pc){
  const pending=pc._pendingIce||[];pc._pendingIce=[];
@@ -331,11 +347,13 @@ async function handleSignal(data){
   if(!pc)pc=createPeer(data.from,false);
   if(data.kind==="renegotiate"){if(socket.id<data.from)await makeOffer(data.from,pc);return;}
   if(data.kind==="offer"){
-   const collision=pc.signalingState!=="stable"||pc._makingOffer;
-   const polite=socket.id>data.from;
-   if(collision&&!polite){console.info("Ignoring colliding offer",data.from);pc._ignoreOffer=true;return;}
+   // Only the lower socket ID is allowed to initiate offers.
+   // This removes offer collisions across 2–5 participants.
+   if(pc.signalingState!=="stable"){
+    console.warn("Unexpected offer while negotiating",data.from);
+    return;
+   }
    pc._ignoreOffer=false;
-   if(collision&&polite&&pc.signalingState!=="stable")await pc.setLocalDescription({type:"rollback"});
    await pc.setRemoteDescription(data.payload);
    await flushCandidates(pc);
    await pc.setLocalDescription(await pc.createAnswer());
@@ -347,7 +365,6 @@ async function handleSignal(data){
    await pc.setRemoteDescription(data.payload);
    await flushCandidates(pc);
   }else if(data.kind==="candidate"){
-   if(pc._ignoreOffer)return;
    if(pc.remoteDescription)await pc.addIceCandidate(data.payload);
    else{pc._pendingIce??=[];pc._pendingIce.push(data.payload);}
   }
